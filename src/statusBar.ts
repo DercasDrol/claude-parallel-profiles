@@ -51,7 +51,7 @@ export class StatusBarManager implements vscode.Disposable {
       return;
     }
 
-    const account = this.accountManager.getStoredAccountInfo(info.configDir!);
+    const account = this.accountManager.getAccountInfoForDisplay(info.configDir!);
 
     if (!account) {
       this.item.text = `$(account) Claude [${info.name}]: login needed`;
@@ -84,7 +84,7 @@ export class StatusBarManager implements vscode.Disposable {
   async showQuickPick(): Promise<void> {
     const info = await this.profileManager.getProfileInfo();
     const account = info.configDir
-      ? this.accountManager.getStoredAccountInfo(info.configDir)
+      ? this.accountManager.getAccountInfoForDisplay(info.configDir)
       : null;
 
     type Item = vscode.QuickPickItem & { action: string };

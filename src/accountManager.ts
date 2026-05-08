@@ -48,6 +48,17 @@ export class AccountManager {
 
   // ─── Read ────────────────────────────────────────────────────────────────
 
+  /**
+   * For display purposes: tries live configDir/.claude.json first (most accurate),
+   * then falls back to the stored .vscode-claude-profile.json state.
+   * Use this for the status bar and quick pick — it always reflects the actual login.
+   */
+  getAccountInfoForDisplay(configDir: string): AccountInfo | null {
+    const live = this.readDotClaudeJson(profileDotClaudeJson(configDir));
+    if (live?.account) return live.account;
+    return this.getStoredAccountInfo(configDir);
+  }
+
   /** Returns stored account info for the given CLAUDE_CONFIG_DIR, or null if not set up. */
   getStoredAccountInfo(configDir: string): AccountInfo | null {
     const stateFile = path.join(configDir, PROFILE_STATE_FILE);

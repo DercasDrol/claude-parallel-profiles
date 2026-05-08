@@ -1,0 +1,75 @@
+{
+  "name": "claude-profiles",
+  "displayName": "Claude Profiles",
+  "description": "Manage separate Claude accounts per VSCode profile with isolated data directories",
+  "version": "0.1.0",
+  "publisher": "claude-profiles",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "keywords": ["claude", "anthropic", "profiles", "accounts"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeProfiles.setupProfile",
+        "title": "Setup Profile",
+        "category": "Claude Profiles"
+      },
+      {
+        "command": "claudeProfiles.loginCurrentProfile",
+        "title": "Login to Claude for Current Profile",
+        "category": "Claude Profiles"
+      },
+      {
+        "command": "claudeProfiles.captureAccount",
+        "title": "Capture Current Account for This Profile",
+        "category": "Claude Profiles"
+      },
+      {
+        "command": "claudeProfiles.restoreAccount",
+        "title": "Restore Saved Account for This Profile",
+        "category": "Claude Profiles"
+      },
+      {
+        "command": "claudeProfiles.showStatus",
+        "title": "Show Profile Status",
+        "category": "Claude Profiles"
+      },
+      {
+        "command": "claudeProfiles.removeProfile",
+        "title": "Remove Account for Current Profile",
+        "category": "Claude Profiles"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Profiles",
+      "properties": {
+        "claudeProfiles.autoRestore": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically restore the saved account state to ~/.claude.json on profile activation."
+        },
+        "claudeProfiles.autoCapture": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically capture account data to the profile directory after a successful Claude login."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "vscode:prepublish": "node esbuild.js --production",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
+  }
+}

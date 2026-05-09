@@ -5,6 +5,11 @@
   "version": "0.1.0",
   "publisher": "tundak",
   "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tundak/claude-profiles"
+  },
+  "license": "MIT",
   "author": {
     "name": "Sohan Yadav"
   },

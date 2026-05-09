@@ -1,8 +1,8 @@
-# Claude Profiles
+# Claude Code Profile Manager
 
 **Use a different Claude account for every VSCode profile — automatically.**
 
-Claude Profiles gives each [VSCode Profile](https://code.visualstudio.com/docs/editor/profiles) its own isolated Claude account and data directory. Switch profiles and the right Claude account is already active — no re-login, no manual token swapping.
+Claude Code Profile Manager gives each [VSCode Profile](https://code.visualstudio.com/docs/editor/profiles) its own isolated Claude Code account and data directory. Switch profiles and the right Claude account is already active — no re-login, no manual token swapping.
 
 ---
 
@@ -49,7 +49,7 @@ npm install -g @anthropic-ai/claude-code
 
 ### 1. Install the extension
 
-Search for **Claude Profiles** in the Extensions panel (`Ctrl+Shift+X` / `Cmd+Shift+X`) and click **Install**.
+Search for **Claude Code Profile Manager** in the Extensions panel (`Ctrl+Shift+X` / `Cmd+Shift+X`) and click **Install**.
 
 ### 2. Switch to the VSCode profile you want to configure
 

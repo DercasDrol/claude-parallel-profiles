@@ -1,9 +1,10 @@
 {
-  "name": "claude-profiles",
-  "displayName": "Claude Profiles",
-  "description": "Manage separate Claude accounts per VSCode profile with isolated data directories",
+  "name": "claude-code-profile-manager",
+  "displayName": "Claude Code Profile Manager",
+  "description": "Manage separate Claude Code accounts per VSCode profile with isolated data directories",
   "version": "0.1.0",
   "publisher": "tundak",
+  "icon": "images/icon.png",
   "author": {
     "name": "Sohan Yadav"
   },
@@ -11,7 +12,7 @@
     "vscode": "^1.85.0"
   },
   "categories": ["Other"],
-  "keywords": ["claude", "anthropic", "profiles", "accounts"],
+  "keywords": ["claude", "claude code", "anthropic", "profiles", "profile manager", "accounts", "multi-account"],
   "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "contributes": {
@@ -19,36 +20,36 @@
       {
         "command": "claudeProfiles.setupProfile",
         "title": "Setup Profile",
-        "category": "Claude Profiles"
+        "category": "Claude Code Profile Manager"
       },
       {
         "command": "claudeProfiles.loginCurrentProfile",
         "title": "Login to Claude for Current Profile",
-        "category": "Claude Profiles"
+        "category": "Claude Code Profile Manager"
       },
       {
         "command": "claudeProfiles.captureAccount",
         "title": "Capture Current Account for This Profile",
-        "category": "Claude Profiles"
+        "category": "Claude Code Profile Manager"
       },
       {
         "command": "claudeProfiles.restoreAccount",
         "title": "Restore Saved Account for This Profile",
-        "category": "Claude Profiles"
+        "category": "Claude Code Profile Manager"
       },
       {
         "command": "claudeProfiles.showStatus",
         "title": "Show Profile Status",
-        "category": "Claude Profiles"
+        "category": "Claude Code Profile Manager"
       },
       {
         "command": "claudeProfiles.removeProfile",
         "title": "Remove Account for Current Profile",
-        "category": "Claude Profiles"
+        "category": "Claude Code Profile Manager"
       }
     ],
     "configuration": {
-      "title": "Claude Profiles",
+      "title": "Claude Code Profile Manager",
       "properties": {
         "claudeProfiles.autoRestore": {
           "type": "boolean",

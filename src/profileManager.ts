@@ -102,6 +102,42 @@ export class ProfileManager {
     return configDir;
   }
 
+  /**
+   * Undoes what setupConfigDir() wrote: removes CLAUDE_CONFIG_DIR from both
+   * claudeCode.environmentVariables and terminal.integrated.env.<platform>.
+   * Safe to call even if the entries are already absent.
+   */
+  async teardownConfigDir(): Promise<void> {
+    const claudeConfig = vscode.workspace.getConfiguration('claudeCode');
+    const envVars: Array<{ name: string; value: string }> =
+      claudeConfig.get('environmentVariables') ?? [];
+    const filtered = envVars.filter((e) => e.name !== 'CLAUDE_CONFIG_DIR');
+    if (filtered.length !== envVars.length) {
+      await claudeConfig.update(
+        'environmentVariables',
+        filtered.length > 0 ? filtered : undefined,
+        vscode.ConfigurationTarget.Global
+      );
+    }
+
+    const platformKey =
+      process.platform === 'win32'
+        ? 'windows'
+        : process.platform === 'darwin'
+          ? 'osx'
+          : 'linux';
+    const termConfig = vscode.workspace.getConfiguration('terminal.integrated.env');
+    const termEnv: Record<string, string> = { ...(termConfig.get<Record<string, string>>(platformKey) ?? {}) };
+    if ('CLAUDE_CONFIG_DIR' in termEnv) {
+      delete termEnv['CLAUDE_CONFIG_DIR'];
+      await termConfig.update(
+        platformKey,
+        Object.keys(termEnv).length > 0 ? termEnv : undefined,
+        vscode.ConfigurationTarget.Global
+      );
+    }
+  }
+
   /** Returns true if the given directory path is a valid CLAUDE_CONFIG_DIR (exists). */
   configDirExists(configDir: string): boolean {
     return fs.existsSync(configDir);

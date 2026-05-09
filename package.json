@@ -2,7 +2,7 @@
   "name": "claude-code-profile-manager",
   "displayName": "Claude Code Profile Manager",
   "description": "Manage separate Claude Code accounts per VSCode profile with isolated data directories",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "tundak",
   "icon": "images/icon.png",
   "repository": {
@@ -50,6 +50,11 @@
       {
         "command": "claudeProfiles.removeProfile",
         "title": "Remove Account for Current Profile",
+        "category": "Claude Code Profile Manager"
+      },
+      {
+        "command": "claudeProfiles.cleanupSettings",
+        "title": "Clean Up Extension Settings (Before Uninstall)",
         "category": "Claude Code Profile Manager"
       }
     ],

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import { ProfileManager } from './profileManager';
 import { AccountManager, AccountInfo } from './accountManager';
 
@@ -194,6 +195,64 @@ export class SetupWizard {
 
     this.accountManager.removeProfileState(info.configDir);
     vscode.window.showInformationMessage(`Removed saved account for profile "${info.name}".`);
+  }
+
+  // ─── Full cleanup (before uninstall) ─────────────────────────────────
+
+  /**
+   * Removes all extension-written state for the current VSCode profile:
+   *  - CLAUDE_CONFIG_DIR from claudeCode.environmentVariables
+   *  - CLAUDE_CONFIG_DIR from terminal.integrated.env.<platform>
+   *  - The .vscode-claude-profile.json state file
+   *  - Optionally the entire ~/.claude-<name>/ directory
+   *
+   * Returns true if the user confirmed and cleanup ran, false if cancelled.
+   */
+  async runFullCleanupForCurrentProfile(): Promise<boolean> {
+    const info = await this.profileManager.getProfileInfo();
+
+    if (!info.isConfigured) {
+      vscode.window.showInformationMessage(
+        'Claude Profiles: No profile configured for this VSCode profile — nothing to clean up.'
+      );
+      return false;
+    }
+
+    const dirLine = info.configDir
+      ? `\n\nData directory on disk: ${info.configDir}`
+      : '';
+
+    const pick = await vscode.window.showWarningMessage(
+      `This will remove the Claude profile "${info.name}" from VSCode settings (CLAUDE_CONFIG_DIR, terminal env). Your Claude login credentials stay in the system Keychain.${dirLine}`,
+      { modal: true },
+      'Clean Up Settings',
+      'Clean Up Settings + Delete Data Directory',
+    );
+    if (!pick) return false;
+
+    // 1. Remove VSCode settings entries
+    await this.profileManager.teardownConfigDir();
+
+    // 2. Remove the account state file if the directory still exists
+    if (info.configDir && fs.existsSync(info.configDir)) {
+      this.accountManager.removeProfileState(info.configDir);
+    }
+
+    // 3. Optionally delete the data directory
+    if (pick === 'Clean Up Settings + Delete Data Directory' && info.configDir) {
+      try {
+        fs.rmSync(info.configDir, { recursive: true, force: true });
+      } catch (err) {
+        vscode.window.showWarningMessage(
+          `Could not delete ${info.configDir}: ${(err as Error).message}`
+        );
+      }
+    }
+
+    vscode.window.showInformationMessage(
+      `Claude profile "${info.name}" cleaned up. You can now safely uninstall the extension.`
+    );
+    return true;
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────

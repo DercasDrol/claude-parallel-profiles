@@ -30,6 +30,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('claudeProfiles.removeProfile', () =>
       wizard.runRemoveForCurrentProfile()
     ),
+    vscode.commands.registerCommand('claudeProfiles.cleanupSettings', async () => {
+      const cleaned = await wizard.runFullCleanupForCurrentProfile();
+      if (cleaned) {
+        // Clear the "have you seen this nudge" markers so they reset cleanly
+        const info = await profileManager.getProfileInfo();
+        const hash = info.vsCodeProfileHash ?? 'default';
+        await context.globalState.update(`claudeProfiles.firstRunShown.${hash}`, undefined);
+        await context.globalState.update(`claudeProfiles.loginNudge.${hash}`, undefined);
+        await statusBar.render();
+      }
+    }),
 
     statusBar
   );

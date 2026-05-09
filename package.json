@@ -3,7 +3,10 @@
   "displayName": "Claude Profiles",
   "description": "Manage separate Claude accounts per VSCode profile with isolated data directories",
   "version": "0.1.0",
-  "publisher": "claude-profiles",
+  "publisher": "tundak",
+  "author": {
+    "name": "Sohan Yadav"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },

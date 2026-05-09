@@ -1,178 +1,158 @@
 # Claude Profiles
 
-A VSCode extension that gives each **VSCode Profile** its own isolated Claude account and data directory. When you switch profiles, the right Claude account is automatically restored — no manual re-login needed.
+**Use a different Claude account for every VSCode profile — automatically.**
+
+Claude Profiles gives each [VSCode Profile](https://code.visualstudio.com/docs/editor/profiles) its own isolated Claude account and data directory. Switch profiles and the right Claude account is already active — no re-login, no manual token swapping.
 
 ---
 
-## How it works
+## Why you need this
 
-Claude Code stores OAuth tokens in the macOS Keychain under a key derived from `CLAUDE_CONFIG_DIR`. This extension:
+If you use Claude Code across multiple contexts — personal projects, work, freelance clients — you know the pain: every time you switch contexts you have to `claude logout`, `claude login`, and wait through the OAuth flow again. Claude Profiles eliminates that entirely.
 
-1. Assigns each VSCode profile a unique `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-work`)
-2. After login, captures a full snapshot of `~/.claude.json` into that directory
-3. On every profile activation, restores the snapshot back to `~/.claude.json` so Claude Code starts with the correct account
-
-```
-VSCode Profile "work"           VSCode Profile "personal"
-  CLAUDE_CONFIG_DIR               CLAUDE_CONFIG_DIR
-  = ~/.claude-work/               = ~/.claude-personal/
-    ├── sessions/                   ├── sessions/
-    ├── settings.json               ├── settings.json
-    └── .vscode-claude-profile.json └── .vscode-claude-profile.json
-         └─ account snapshot              └─ account snapshot
-
-Keychain: Claude Code-credentials-<work-hash>
-Keychain: Claude Code-credentials-<personal-hash>
-```
+| Without Claude Profiles | With Claude Profiles |
+|---|---|
+| One account shared across all contexts | Each VSCode profile has its own account |
+| Manual `claude login` every time you switch | Auto-restore on profile activation |
+| Risk of committing under the wrong account | Guaranteed correct identity per workspace |
 
 ---
 
-## Prerequisites
+## Features
 
-| Requirement | Version | Notes |
-|-------------|---------|-------|
-| **VSCode** | ≥ 1.85 | Profiles feature required |
-| **Claude Code VSCode extension** | latest | Provides `claudeCode.environmentVariables` setting |
-| **Claude CLI** (`claude`) | latest | Must be on `$PATH` in your shell |
-| **macOS** | any | Linux/Windows supported; Keychain isolation is macOS-only |
+- **Automatic account switching** — activating a VSCode profile instantly restores the correct Claude account
+- **Isolated data directories** — each profile gets its own `CLAUDE_CONFIG_DIR` (`~/.claude-work`, `~/.claude-personal`, etc.)
+- **Cross-platform** — works on macOS, Linux, and Windows
+- **Status bar indicator** — always shows which Claude account is active
+- **One-time setup** — configure once per profile, then forget about it
+- **Safe credential storage** — OAuth tokens remain in the OS credential store (Keychain / libsecret / Windows Credential Manager); only metadata is stored in the profile directory
 
-Install the Claude CLI:
+---
+
+## Requirements
+
+| Requirement | Version |
+|---|---|
+| VSCode | ≥ 1.85 |
+| [Claude Code extension](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code) | latest |
+| Claude CLI (`claude`) | latest — must be on `$PATH` |
+
+Install the Claude CLI if you haven't already:
+
 ```bash
 npm install -g @anthropic-ai/claude-code
-# or via Homebrew
-brew install claude
 ```
 
 ---
 
-## Installation
+## Quick Start
 
-### Option A — Load unpacked (development)
+### 1. Install the extension
 
-```bash
-git clone <this-repo>
-cd extension
-npm install
-npm run build
-```
+Search for **Claude Profiles** in the Extensions panel (`Ctrl+Shift+X` / `Cmd+Shift+X`) and click **Install**.
 
-Then in VSCode:
-1. `Cmd+Shift+P` → **Developer: Install Extension from Location…**
-2. Select the `extension/` folder
+### 2. Switch to the VSCode profile you want to configure
 
-### Option B — Package and install
+Use the profile picker in the bottom-left corner of VSCode (or `Ctrl+Shift+P` → **Profiles: Switch Profile**).
 
-```bash
-npm install -g @vscode/vsce
-vsce package          # produces claude-profiles-0.1.0.vsix
-```
+### 3. Run the setup wizard
 
-Then in VSCode:
-- `Cmd+Shift+P` → **Extensions: Install from VSIX…** → select the `.vsix` file
+`Ctrl+Shift+P` → **Claude Profiles: Setup Profile**
 
-### Option C — F5 (Extension Development Host)
+- Enter a short name (e.g. `work`, `personal`, `client-a`)
+- The extension creates `~/.claude-<name>/` and configures `CLAUDE_CONFIG_DIR` for both the Claude Code extension and integrated terminals
 
-Open the `extension/` folder in VSCode and press **F5**. A new VSCode window opens with the extension loaded.
+### 4. Log in
 
----
-
-## Setup (per profile)
-
-Do this once for each VSCode profile that should have its own Claude account.
-
-### Step 1 — Run the setup wizard
-
-`Cmd+Shift+P` → **Claude Profiles: Setup Profile**
-
-- Enter a short name for the profile (e.g. `work`, `personal`, `client-a`)
-- The extension creates `~/.claude-<name>/` and writes `CLAUDE_CONFIG_DIR` into:
-  - `claudeCode.environmentVariables` (for the Claude Code extension)
-  - `terminal.integrated.env.osx` / `.linux` / `.windows` (for terminals)
-
-### Step 2 — Log in to Claude
-
-Click **Login to Claude now** in the prompt (or run **Claude Profiles: Login to Claude for Current Profile**).
+Click **Login to Claude now** in the prompt (or run **Claude Profiles: Login to Current Profile**).
 
 - A terminal opens pre-loaded with the correct `CLAUDE_CONFIG_DIR`
 - Press **Enter** to start the OAuth flow and authenticate in your browser
-- The extension watches `~/.claude.json` for the change that signals success
-- Account data is **automatically saved** to `~/.claude-<name>/.vscode-claude-profile.json`
+- The extension detects the successful login and saves your account automatically
 - The status bar updates to show your email
 
-### Step 3 — Repeat for each profile
+### 5. Repeat for each profile
 
-Switch to your next VSCode profile and repeat steps 1–2 with a different account.
+Switch to your next VSCode profile and repeat steps 3–4 with a different Claude account.
 
 ---
 
-## Daily use
+## Daily Use
 
-Nothing special is required. When you open a VSCode window in a configured profile:
+Nothing changes about how you work. When you open a VSCode window in a configured profile:
 
-- The extension activates and **restores** `~/.claude.json` from the profile's saved snapshot
-- Claude Code starts authenticated as the correct account
-- The status bar shows `$(account) <profile-name>: you@example.com`
+1. The extension activates automatically
+2. Your Claude account is restored from the saved snapshot
+3. Claude Code starts authenticated as the correct account
+4. The status bar shows `$(account) <profile>: you@example.com`
 
-Click the status bar item at any time to:
+### Status bar quick menu
+
+Click the status bar item at any time to access:
 
 | Action | Description |
-|--------|-------------|
+|---|---|
 | **Login / Switch Account** | Re-run `claude login` for the current profile |
-| **Capture account** | Manually save `~/.claude.json` to this profile's dir |
+| **Capture account** | Manually save the current `~/.claude.json` to this profile |
 | **Restore this profile's account** | Write the saved snapshot back to `~/.claude.json` |
-| **Reconfigure profile** | Change the profile name / `CLAUDE_CONFIG_DIR` |
-| **Remove saved account** | Clear cached account info (Keychain is untouched) |
+| **Reconfigure profile** | Change the profile name or `CLAUDE_CONFIG_DIR` path |
+| **Remove saved account** | Clear cached account info for this profile |
+
+---
+
+## How It Works
+
+Claude Code reads authentication state from `~/.claude.json` and stores OAuth tokens in the OS credential store under a key derived from `CLAUDE_CONFIG_DIR`. Claude Profiles takes advantage of this:
+
+1. Assigns each VSCode profile a unique `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-work`)
+2. After login, captures a snapshot of `~/.claude.json` into that directory
+3. On profile activation, restores the snapshot to `~/.claude.json` so Claude Code picks up the right account
+
+```
+VSCode Profile "work"              VSCode Profile "personal"
+  CLAUDE_CONFIG_DIR                  CLAUDE_CONFIG_DIR
+  = ~/.claude-work/                  = ~/.claude-personal/
+    └── .vscode-claude-profile.json    └── .vscode-claude-profile.json
+         (account snapshot)                 (account snapshot)
+
+OS Credential Store:
+  Claude Code-credentials-<work-hash>
+  Claude Code-credentials-<personal-hash>
+```
 
 ---
 
 ## Settings
 
 | Setting | Default | Description |
-|---------|---------|-------------|
-| `claudeProfiles.autoRestore` | `true` | Restore saved `~/.claude.json` snapshot on profile activation |
-| `claudeProfiles.autoCapture` | `true` | Auto-capture account data after a detected `~/.claude.json` change during login |
+|---|---|---|
+| `claudeProfiles.autoRestore` | `true` | Automatically restore the saved account on profile activation |
+| `claudeProfiles.autoCapture` | `true` | Automatically capture account data after a successful login |
 
 ---
 
-## Account data stored per profile
+## Known Limitations
 
-Each `CLAUDE_CONFIG_DIR` contains a `.vscode-claude-profile.json` file (mode `600`) with:
+- **Multiple windows open simultaneously**: If you have two VSCode windows open in different profiles at the same time, `~/.claude.json` reflects whichever profile activated last. Functional auth (OS credential store) is not affected — only the account metadata shown in Claude Code may be from the wrong profile. **Workaround:** click **Restore this profile's account** after switching focus.
 
-```json
-{
-  "account": {
-    "email": "you@example.com",
-    "displayName": "Your Name",
-    "organizationName": "Acme Corp",
-    "savedAt": "2026-05-08T07:20:00.000Z"
-  },
-  "dotClaudeJsonSnapshot": { ... }
-}
-```
-
-The `dotClaudeJsonSnapshot` is the full `~/.claude.json` captured after login — this is what gets restored on profile switch.
+- **API key users**: This extension is designed for OAuth (Claude.ai) login. If you authenticate via `ANTHROPIC_API_KEY`, set the key directly in `claudeCode.environmentVariables` per profile in VSCode settings — no extension needed.
 
 ---
 
-## Caveats
+## Privacy & Security
 
-- **Simultaneous multi-profile windows**: If you have two VSCode windows open in different profiles at the same time, `~/.claude.json` reflects whichever profile last activated. Functional auth (Keychain) is unaffected — only the metadata display in Claude Code may be from the wrong account. The workaround is to click **Restore this profile's account** after switching focus.
-- **Linux / Windows**: OAuth tokens are stored in the system credential store (libsecret / Windows Credential Manager) rather than macOS Keychain. The per-`CLAUDE_CONFIG_DIR` isolation behaviour is the same.
-- **API key users**: This extension is designed for OAuth (Claude.ai) login. If you use `ANTHROPIC_API_KEY`, simply set the key via `claudeCode.environmentVariables` directly in each profile's VSCode settings — no extension needed.
+- OAuth tokens are **never** moved out of the OS credential store (macOS Keychain, Linux libsecret, Windows Credential Manager)
+- The only file written by this extension is `.vscode-claude-profile.json` inside each `CLAUDE_CONFIG_DIR`, stored with mode `600` (owner-read-only on Unix)
+- No data is sent to any server by this extension
 
 ---
 
-## Project structure
+## Contributing
 
-```
-extension/
-├── src/
-│   ├── extension.ts        # Activation, command registration, auto-restore
-│   ├── profileManager.ts   # Profile detection, CLAUDE_CONFIG_DIR setup
-│   ├── accountManager.ts   # Snapshot capture/restore, file watcher
-│   ├── statusBar.ts        # Status bar item + quick-pick menu
-│   └── setupWizard.ts      # Setup wizard + login flow
-├── esbuild.js              # Bundle script
-├── package.json
-└── tsconfig.json
-```
+Issues and pull requests are welcome. See the [GitHub repository](https://github.com/claude-profiles/vscode-claude-profiles) for source code, build instructions, and contribution guidelines.
+
+---
+
+## License
+
+[MIT](LICENSE) © Sohan Yadav

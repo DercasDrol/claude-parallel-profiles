@@ -1,17 +1,17 @@
 {
-  "name": "claude-code-profile-manager",
-  "displayName": "Claude Code Profile Manager",
-  "description": "Manage separate Claude Code accounts per VSCode profile with isolated data directories",
-  "version": "0.1.1",
-  "publisher": "tundak",
+  "name": "claude-parallel-accounts",
+  "displayName": "Claude Parallel Accounts",
+  "description": "Run a different Claude Code account in each VSCode window simultaneously — capture, switch, and isolate accounts per window.",
+  "version": "1.0.5",
+  "publisher": "DercasDrol",
   "icon": "images/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tundak/claude-profiles"
+    "url": "https://github.com/DercasDrol/claude-parallel-profiles"
   },
   "license": "MIT",
   "author": {
-    "name": "Sohan Yadav"
+    "name": "dercasdrol"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -20,56 +20,52 @@
   "keywords": ["claude", "claude code", "anthropic", "profiles", "profile manager", "accounts", "multi-account"],
   "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
+  "extensionKind": ["workspace"],
   "contributes": {
     "commands": [
       {
-        "command": "claudeProfiles.setupProfile",
-        "title": "Setup Profile",
-        "category": "Claude Code Profile Manager"
+        "command": "claudeProfiles.switchAccount",
+        "title": "Switch Account for This Window",
+        "category": "Claude Accounts"
       },
       {
-        "command": "claudeProfiles.loginCurrentProfile",
-        "title": "Login to Claude for Current Profile",
-        "category": "Claude Code Profile Manager"
+        "command": "claudeProfiles.switchAccountReload",
+        "title": "Switch Account for This Window (Reload)",
+        "category": "Claude Accounts"
       },
       {
         "command": "claudeProfiles.captureAccount",
-        "title": "Capture Current Account for This Profile",
-        "category": "Claude Code Profile Manager"
+        "title": "Save Current Account",
+        "category": "Claude Accounts"
       },
       {
-        "command": "claudeProfiles.restoreAccount",
-        "title": "Restore Saved Account for This Profile",
-        "category": "Claude Code Profile Manager"
+        "command": "claudeProfiles.showConversations",
+        "title": "Show Live Conversations & Accounts",
+        "category": "Claude Accounts"
       },
       {
         "command": "claudeProfiles.showStatus",
-        "title": "Show Profile Status",
-        "category": "Claude Code Profile Manager"
+        "title": "Show Account Menu",
+        "category": "Claude Accounts"
       },
       {
         "command": "claudeProfiles.removeProfile",
-        "title": "Remove Account for Current Profile",
-        "category": "Claude Code Profile Manager"
-      },
-      {
-        "command": "claudeProfiles.cleanupSettings",
-        "title": "Clean Up Extension Settings (Before Uninstall)",
-        "category": "Claude Code Profile Manager"
+        "title": "Forget a Saved Account",
+        "category": "Claude Accounts"
       }
     ],
     "configuration": {
-      "title": "Claude Code Profile Manager",
+      "title": "Claude Accounts",
       "properties": {
-        "claudeProfiles.autoRestore": {
+        "claudeProfiles.sharedHistory": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically restore the saved account state to ~/.claude.json on profile activation."
+          "description": "Share conversation history across all accounts (~/.claude-shared): projects, sessions and related state are symlinked from every account's data dir, so a chat continues after switching accounts. Credentials and identity stay per-account. Disable to keep each account's history fully isolated."
         },
-        "claudeProfiles.autoCapture": {
+        "claudeProfiles.reloadOnSwitch": {
           "type": "boolean",
-          "default": true,
-          "description": "Automatically capture account data to the profile directory after a successful Claude login."
+          "default": false,
+          "description": "Reload the whole window after switching accounts. Normally the active conversation switches live on its next message; enable this only if you want a guaranteed full re-read via a window reload."
         }
       }
     }
@@ -77,8 +73,12 @@
   "scripts": {
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
-    "vscode:prepublish": "node esbuild.js --production",
-    "package": "vsce package"
+    "check-types": "tsc --noEmit",
+    "compile": "npm run check-types && node esbuild.js",
+    "vscode:prepublish": "npm run check-types && node esbuild.js --production",
+    "vscode:uninstall": "node ./uninstall.js",
+    "package": "vsce package",
+    "release": "vsce publish"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

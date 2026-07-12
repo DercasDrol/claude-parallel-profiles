@@ -1,6 +1,7 @@
 src/
 node_modules/
 .vscode/
+.github/
 esbuild.js
 tsconfig.json
 package-lock.json

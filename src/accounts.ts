@@ -87,6 +87,20 @@ export function expandHome(p: string): string {
 }
 
 /**
+ * Mirror of the registry's directories, on disk.
+ *
+ * The uninstall hook runs as a bare `node` script with no vscode API, so
+ * globalState — where the registry actually lives — is unreadable to it. Without
+ * this list it could only guess which `~/.claude-*` dirs are ours, and the one
+ * thing it must never do is delete a directory a user made for themselves. So
+ * the registry writes down exactly what it manages, and uninstall deletes
+ * nothing else.
+ */
+function manifestPath(): string {
+  return path.join(os.homedir(), '.claude-windows', '.manifest.json');
+}
+
+/**
  * The account registry is stored in globalState so every window (and every
  * VSCode profile) on this machine sees the same set of accounts.
  */
@@ -95,6 +109,24 @@ export class AccountRegistry {
 
   list(): Account[] {
     return this.context.globalState.get<Account[]>(REGISTRY_KEY, []);
+  }
+
+  /**
+   * Records the dirs this extension manages, for the uninstall hook to clean up.
+   * Forgotten accounts are included: their dirs are ours too and stay on disk.
+   * Best-effort — a missing manifest only means uninstall leaves the stores be.
+   */
+  writeManifest(): void {
+    try {
+      const stores = [...this.list(), ...this.listForgotten()].map((a) => path.normalize(a.dir));
+      const file = manifestPath();
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(file, JSON.stringify({ stores: [...new Set(stores)] }, null, 2), {
+        mode: 0o600,
+      });
+    } catch {
+      /* best-effort */
+    }
   }
 
   get(name: string): Account | undefined {
@@ -146,11 +178,13 @@ export class AccountRegistry {
     list.push(account);
     list.sort((a, b) => a.name.localeCompare(b.name));
     await this.context.globalState.update(REGISTRY_KEY, list);
+    this.writeManifest();
   }
 
   async remove(name: string): Promise<void> {
     const list = this.list().filter((a) => a.name !== name);
     await this.context.globalState.update(REGISTRY_KEY, list);
+    this.writeManifest();
   }
 
   /**
@@ -181,6 +215,7 @@ export class AccountRegistry {
     const rest = this.listForgotten().filter((a) => path.normalize(a.dir) !== norm);
     rest.push(account);
     await this.context.globalState.update(FORGOTTEN_KEY, rest);
+    this.writeManifest();
   }
 
   /** Restores a previously forgotten account matching this email, if any. */
@@ -235,6 +270,10 @@ export class AccountRegistry {
       if (this.get(acc.name)) continue;
       await this.add(acc);
     }
+    // Runs on every activation, so an install that predates the manifest gets one
+    // even if nothing was discovered — otherwise uninstall would find no list and
+    // conservatively leave every store behind.
+    this.writeManifest();
     return this.list();
   }
 }

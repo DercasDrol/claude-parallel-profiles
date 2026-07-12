@@ -181,9 +181,7 @@ export class SetupWizard {
       vscode.window.showErrorMessage(`Could not save account: ${(err as Error).message}`);
       return undefined;
     }
-    if (vscode.workspace.getConfiguration('claudeProfiles').get<boolean>('sharedHistory', true)) {
-      ensureSharedHistory([target.dir]);
-    }
+    ensureSharedHistory([target.dir]);
     target.email = status.email;
     await this.registry.add(target);
     await this.binding.bind(target);

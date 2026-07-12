@@ -39,17 +39,32 @@ export function workingRoot(): string {
 }
 
 /**
- * This window's working dir. Derived from the workspace folder, so reopening a
- * project lands on the same dir (and keeps its Claude Code project settings);
- * a folderless window falls back to an id minted once and kept in workspaceState.
+ * This window's working dir. Derived from the window's WORKSPACE IDENTITY, so
+ * reopening a project lands on the same dir (and keeps its Claude Code project
+ * settings); a folderless window falls back to an id minted once and kept in
+ * workspaceState.
+ *
+ * Identity is the `.code-workspace` file when there is one, and the first folder
+ * otherwise — deliberately, because that is precisely what VSCode refuses to open
+ * twice: ask for a folder or a workspace that is already open and it focuses the
+ * existing window instead of making a second one. Keying on it therefore hands
+ * every window a dir of its own, which is the invariant this whole file exists to
+ * uphold.
+ *
+ * Keying on the first FOLDER alone (as before) broke that: a folder opened
+ * directly and a `.code-workspace` containing that same folder are two windows
+ * with one first-folder path — so they shared a working dir, and binding one to
+ * a second account overwrote the other's token. That is the very failure this
+ * design was built to make impossible, sneaking back in through the key.
  *
  * Read synchronously — it runs during activation, before Claude Code reads the
  * env, and that race is the whole reason this extension works at all.
  */
 export function windowWorkingDir(context: vscode.ExtensionContext): string {
-  const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (folder) {
-    const id = crypto.createHash('sha1').update(folder).digest('hex').slice(0, 12);
+  const identity =
+    vscode.workspace.workspaceFile?.toString() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (identity) {
+    const id = crypto.createHash('sha1').update(identity).digest('hex').slice(0, 12);
     return path.join(workingRoot(), id);
   }
   let id = context.workspaceState.get<string>(WINDOW_ID_KEY);

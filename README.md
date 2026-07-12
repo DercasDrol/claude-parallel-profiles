@@ -21,8 +21,9 @@ Claude Code signs you into **one** account, shared by every VSCode window. If yo
 - **Sign in as usual** — through Claude Code's own UI (its account menu; `/login` in the chat works too). The extension notices and saves the account by itself — nothing extra to click, no names to invent: the account *is* its email.
 - **Each window picks its account** from the status bar. Two windows run two accounts simultaneously — no logout/login dance, no cross-contamination. The window's integrated terminals get the same account.
 - **Switching reloads the window** — required, not cosmetic: Claude Code reads its account once at start-up, so only a reload makes it both *show* and *bill* the account you picked.
-- **History is one whole.** Normally chats live inside the account's data directory and vanish when you switch. Here they live in one shared store: hit a usage limit, switch account, *continue the same conversation*.
+- **History stays one whole.** Giving each window its own data directory would scatter your chats across them, so the extension keeps them in one store instead — your history is exactly the single history Claude Code always had. Hit a usage limit, switch account, *continue the same conversation*.
 - **Forget really signs out.** Forgetting an account deletes its OAuth token from every copy on this machine and stops sessions running on it. The data directories stay — signing in again restores everything.
+- **Uninstalling really cleans up.** Your history is consolidated back into the default `~/.claude`, your last account is handed back to Claude Code (still signed in), and every folder the extension made is deleted — no tokens left lying around.
 
 > ⭐ **Enjoying it?** [Rate it on the Marketplace](https://marketplace.visualstudio.com/items?itemName=DercasDrol.claude-parallel-accounts&ssr=false#review-details) — it helps other developers discover it.
 
@@ -66,21 +67,25 @@ Claude Code signs you into **one** account, shared by every VSCode window. If yo
 
 ---
 
-## Shared conversation history
+## One conversation history
 
-Claude Code keeps conversations *inside* the account's data directory — switch account, and your chats vanish from the panel. With `claudeProfiles.sharedHistory` (**on by default**) history lives in one shared store, `~/.claude-shared`, symlinked from every account directory:
+Claude Code has **one** history: it is stored per *data directory*, and vanilla Claude Code only ever has one directory. This extension gives each window a directory of its own — so it has to put the history back together, or installing it would make every conversation you ever had disappear from the panel.
+
+It does that with one store, `~/.claude-shared`, symlinked from every directory:
 
 ```text
-~/.claude-work/projects      ──┐
-~/.claude-personal/projects  ──┼──▶  ~/.claude-shared/projects/<per-repo>/…
-~/.claude/projects           ──┘
+~/.claude/projects                ──┐
+~/.claude-work/projects           ──┼──▶  ~/.claude-shared/projects/<per-repo>/…
+~/.claude-windows/a1b2…/projects  ──┘
 ```
 
-- Conversations, session state, plans and todos are shared. **Credentials and identity are never shared** — they stay strictly per-account.
-- Transcripts remain keyed by workspace folder inside the store, so nothing leaks between repositories.
-- During the initial merge, collisions resolve newer-wins; the older file is kept under `~/.claude-shared/.merge-backup`, never deleted.
+- Conversations, session state, plans and todos live there. **Credentials and identity never do** — those stay strictly per-account, which is the whole point of the extension.
+- Transcripts stay keyed by workspace folder, exactly as Claude Code writes them, so nothing leaks between repositories.
+- Hit a usage limit, switch account, carry on in the same conversation.
 
-**Turning it off** gives every account its own full copy of the history, diverging from there. **Uninstalling** reverts all symlinks to real directories automatically — Claude Code works as if the extension never existed.
+There is **nothing to configure** — this isn't a feature bolted onto Claude Code, it's what keeps Claude Code's own behaviour intact. (Up to v1.2.7 a `sharedHistory` toggle existed. Turning it off isolated nothing meaningful — it copied the entire history into every directory. It's gone.)
+
+**Uninstalling** moves the store back into the default `~/.claude` — see [Uninstalling](#uninstalling).
 
 ---
 
@@ -106,9 +111,7 @@ The details that make it reliable — each one a bug found and fixed:
 
 ## Settings
 
-There is exactly one setting:
-
-- **`claudeProfiles.sharedHistory`** (default: `true`) — one conversation history shared by all accounts. Turn it off to keep each account's history isolated; every account gets its own full copy from that moment on.
+**None.** The extension has no settings — it does one thing and there is nothing to tune. Accounts are managed entirely from the status bar.
 
 ---
 
@@ -120,9 +123,21 @@ This extension is built to manage credentials, so it holds itself to a strict po
 - **Everything stays in your home directory.** Accounts, working copies and the history store live under `~/.claude*`, created with owner-only permissions (`600`/`700`). Credentials are only ever *copied between* Claude Code's own data directories on this machine — never parsed beyond checking they exist, never displayed, never transmitted.
 - **Conversations are moved, not read.** Shared history relinks the files; the extension does not inspect their contents.
 - **Minimal footprint elsewhere:** the workspace folder path is hashed to tell windows apart; `claude auth status` is asked (locally, read-only) to confirm a directory is signed in; on Linux/WSL the process list is scanned only during *Forget*, to stop `claude` processes running on the token being deleted.
-- **Self-restricted in the VSCode manifest:** disabled in virtual workspaces, and in Restricted Mode (untrusted folders) it never reads workspace content and workspace settings cannot override its configuration ([`capabilities`](package.json)).
+- **Self-restricted in the VSCode manifest:** disabled in virtual workspaces, and in Restricted Mode (untrusted folders) it never reads workspace content — only the folder's path, to tell windows apart ([`capabilities`](package.json)).
 - **Inert off Linux.** On unsupported platforms it performs no operations at all — no file reads, no writes, no account changes; the uninstall hook is guarded the same way.
-- **Uninstalling cleans up:** its working copies lose their credentials, and all history symlinks revert to real directories — Claude Code behaves as if the extension never existed.
+- **Uninstalling cleans up after itself:** every directory the extension created is deleted, so no OAuth token it ever copied is left behind — see [Uninstalling](#uninstalling).
+
+---
+
+## Uninstalling
+
+Removing the extension leaves the machine as if it had never been installed — **and leaves Claude Code signed in and working**. Automatically, on uninstall:
+
+- **Your history is consolidated** into the default `~/.claude` — the shared store is *moved* there (instant, whatever its size), and any history an account kept to itself is folded in. Nothing is lost: plain Claude Code has one history, not one per account.
+- **Your last-used account is handed back**, so Claude Code keeps working exactly where you left off. Its token and its identity go where vanilla Claude Code looks for them (`~/.claude/.credentials.json` and `~/.claude.json`) — together, never mismatched. Settings that predate the extension are merged, not overwritten.
+- **Every directory the extension created is deleted** — the account stores, the per-window working copies, the shared store. No duplicated history, and no OAuth token left in a folder only this extension ever used.
+
+Your other accounts stay signed out afterwards — sign into them the normal way. Directories the extension didn't create are never touched: it deletes only what its own registry says it made.
 
 ---
 
@@ -132,7 +147,8 @@ This extension is built to manage credentials, so it holds itself to a strict po
 - **Loads at every VSCode start-up** (`*` activation). Required to win the activation race against Claude Code — see [How it works](#how-it-works). The extension is deliberately tiny, so the impact is milliseconds.
 - **API-key users**: this is for OAuth (claude.ai) logins. With `ANTHROPIC_API_KEY` you don't need it — set the key per window yourself.
 - **Switching reloads the window** — a consequence of Claude Code reading its account once at start-up; surfaced honestly rather than pretended around.
-- The account email is read from the account's config file because recent Claude Code versions don't expose it via `claude auth status`.
+- **Uninstalling leaves you signed into one account** (the last one you used). Vanilla Claude Code holds one account at a time — the others have to be signed into the normal way.
+- **The same project in two windows shares one conversation list.** VSCode won't open the same folder twice, but a folder and a `.code-workspace` containing it are two windows on one project — and since history is one store (as it is in plain Claude Code), both see the same chats and could resume the same one under *different accounts*. The transcript is a tree of parent-linked entries, so this forks the conversation rather than corrupting it, but the two branches will bill two accounts. Don't drive one chat from two windows at once.
 
 ---
 

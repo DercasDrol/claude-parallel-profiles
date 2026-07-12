@@ -113,16 +113,32 @@ export class StatusBarManager implements vscode.Disposable {
    * identity is only a fast fallback for the email while the CLI is still
    * answering. (A confirmed `loggedIn` without a token file is still trusted —
    * that's an API-key setup, which keeps no `.credentials.json`.)
+   *
+   * The three cached states are NOT interchangeable and collapsing them is a bug:
+   *   undefined → not asked yet
+   *   null      → the CLI could not be run (no `claude` on PATH, timeout)
+   *   object    → the CLI answered; `loggedIn` is then the verdict
+   * Treating `null` as "signed out" put a warning badge and "Claude: sign in" on
+   * a perfectly signed-in window whose only sin was a `claude` binary the
+   * extension host couldn't reach. A failed question is not a negative answer:
+   * fall back to the files on disk, and just say it isn't confirmed.
    */
-  private resolve(dir: string): { email?: string; signedOut: boolean; confirmed: boolean } {
+  private resolve(dir: string): {
+    email?: string;
+    signedOut: boolean;
+    confirmed: boolean;
+    unreachable: boolean;
+  } {
     const status = this.cachedStatus(dir);
+    const unreachable = status === null;
     const cliSaysIn = status?.loggedIn === true;
-    const cliSaysOut = status !== undefined && status?.loggedIn !== true;
+    const cliSaysOut = status !== undefined && status !== null && status.loggedIn !== true;
     const signedOut = cliSaysOut || (!hasCredentials(dir) && !cliSaysIn);
     return {
       email: signedOut ? undefined : status?.email ?? readIdentity(dir)?.email,
       signedOut,
       confirmed: cliSaysIn,
+      unreachable,
     };
   }
 
@@ -135,8 +151,9 @@ export class StatusBarManager implements vscode.Disposable {
    */
   private card(sections: string[]): vscode.MarkdownString {
     const arg = (v: unknown) => encodeURIComponent(JSON.stringify(v));
+    // No "Settings" link: the extension deliberately has none, and a gear that
+    // opens an empty settings page is worse than no gear at all.
     const links = [
-      `[$(gear) Settings](command:workbench.action.openSettings?${arg('claudeProfiles')} "Configure Claude Parallel Accounts")`,
       `[$(extensions) Extension](command:extension.open?${arg([EXTENSION_ID])} "Open the extension page")`,
       `[$(output) Log](command:claudeProfiles.showLog "Show what this extension has been doing")`,
     ].join(' &nbsp;·&nbsp; ');
@@ -156,7 +173,7 @@ export class StatusBarManager implements vscode.Disposable {
     const savedName = this.registry.getByDir(dir)?.name;
 
     const status = this.cachedStatus(dir);
-    const { email, signedOut, confirmed } = this.resolve(dir);
+    const { email, signedOut, confirmed, unreachable } = this.resolve(dir);
     const notLoggedIn = signedOut;
 
     if (email) {
@@ -194,7 +211,12 @@ export class StatusBarManager implements vscode.Disposable {
           this.binding.rememberedForFolder() ? ' · _auto-selected: this folder used it last time_' : ''
         }`,
         !isSaved ? '_$(circle-outline) Not saved yet — saving lets you switch back to it later._' : '',
-        confirmed ? '' : '_Confirming with `claude auth status`…_',
+        unreachable
+          ? '_Could not run `claude auth status` (is the `claude` CLI on your PATH?) — showing the ' +
+            'account from its config file, which may lag behind the real token._'
+          : confirmed
+            ? ''
+            : '_Confirming with `claude auth status`…_',
         actions.join(' &nbsp;·&nbsp; '),
       ]);
       this.item.backgroundColor = undefined;

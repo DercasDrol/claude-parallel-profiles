@@ -98,7 +98,16 @@ function linkDirEntry(accountDir: string, store: string, name: string): void {
 /**
  * Moves everything from src into dst. On a name collision the newer file wins
  * and the older one is preserved under <store>/.merge-backup rather than
- * deleted (transcripts are user data — never destroy them).
+ * deleted (transcripts are user data — never destroy them) — unless the two are
+ * byte-identical, in which case there is nothing to preserve and the duplicate
+ * is simply dropped.
+ *
+ * That exception is what keeps the store from exploding. Un-sharing gives EVERY
+ * account and working dir a full copy of the history; re-sharing then merges
+ * them all back, so every file collides with an identical twin once per dir. A
+ * blanket "back up the loser" turned each off/on cycle (including an
+ * uninstall/reinstall) into another full duplicate of the history in
+ * .merge-backup — 1.3 GB of real history had grown 12 GB of backups of itself.
  */
 function mergeDirInto(src: string, dst: string, store: string): void {
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
@@ -114,8 +123,13 @@ function mergeDirInto(src: string, dst: string, store: string): void {
       mergeDirInto(s, d, store);
       continue;
     }
-    // Collision between files: keep the newer, back up the older.
+    // Collision between files: an identical copy is not history, just a duplicate.
     const srcStat = fs.statSync(s);
+    if (sameContent(s, d, srcStat.size, dstStat.size)) {
+      fs.rmSync(s, { force: true });
+      continue;
+    }
+    // Genuinely different: keep the newer, back up the older.
     const loser = srcStat.mtimeMs > dstStat.mtimeMs ? d : s;
     const backup = path.join(store, '.merge-backup', path.relative(store, dst), `${entry.name}.${Date.now()}`);
     fs.mkdirSync(path.dirname(backup), { recursive: true });
@@ -124,46 +138,24 @@ function mergeDirInto(src: string, dst: string, store: string): void {
   }
 }
 
-/**
- * Reverses ensureSharedHistory: every symlink into the shared store is
- * replaced by a REAL copy of the store's current content, so each account
- * keeps the full history it could see while sharing was on, and further
- * conversations diverge per-account again. The store itself is left on disk
- * (it holds the only merge backups); the caller tells the user it can be
- * deleted. Idempotent and best-effort like its counterpart.
- */
-export function unshareHistory(accountDirs: string[]): string[] {
-  const warnings: string[] = [];
-  const store = sharedStoreDir();
-  const seen = new Set<string>();
-  for (const rawDir of accountDirs) {
-    const dir = path.normalize(rawDir);
-    if (seen.has(dir) || dir === path.normalize(store) || !fs.existsSync(dir)) continue;
-    seen.add(dir);
-    for (const name of [...SHARED_DIRS, ...SHARED_FILES]) {
-      try {
-        materializeEntry(dir, store, name);
-      } catch (err) {
-        warnings.push(`${path.join(dir, name)}: ${(err as Error).message}`);
-      }
-    }
+/** Byte equality, size-gated so the common "differs" case never reads a file. */
+function sameContent(a: string, b: string, sizeA: number, sizeB: number): boolean {
+  if (sizeA !== sizeB) return false;
+  try {
+    return fs.readFileSync(a).equals(fs.readFileSync(b));
+  } catch {
+    return false; // unreadable → treat as different and take the safe (backup) path
   }
-  return warnings;
 }
 
-/** Replaces one symlink-into-store with a real copy of the store content. */
-function materializeEntry(accountDir: string, store: string, name: string): void {
-  const src = path.join(accountDir, name);
-  const dst = path.join(store, name);
-  const st = fs.lstatSync(src, { throwIfNoEntry: false });
-  if (!st?.isSymbolicLink()) return; // real dir/file or absent — not ours
-  if (path.normalize(fs.readlinkSync(src)) !== path.normalize(dst)) return; // foreign link
-  fs.unlinkSync(src);
-  if (!fs.existsSync(dst)) return;
-  fs.cpSync(dst, src, { recursive: true });
-}
-
-/** Appends an account's file (e.g. history.jsonl) into the store + symlinks it. */
+/**
+ * Merges an account's line-based file (history.jsonl) into the store + symlinks it.
+ *
+ * Only lines the store doesn't already have are appended. Un-sharing hands every
+ * account dir a full copy of this file, so a blind append re-added the entire
+ * history on every re-share: 4 real entries had become 84 identical lines, and
+ * each off/on cycle multiplied them again.
+ */
 function linkFileEntry(accountDir: string, store: string, name: string): void {
   const src = path.join(accountDir, name);
   const dst = path.join(store, name);
@@ -173,9 +165,16 @@ function linkFileEntry(accountDir: string, store: string, name: string): void {
     if (path.normalize(fs.readlinkSync(src)) === path.normalize(dst)) return;
     fs.unlinkSync(src);
   } else if (st?.isFile()) {
-    let content = fs.readFileSync(src, 'utf-8');
-    if (content && !content.endsWith('\n')) content += '\n';
-    fs.appendFileSync(dst, content, { mode: 0o600 });
+    const existing = fs.existsSync(dst) ? fs.readFileSync(dst, 'utf-8') : '';
+    const known = new Set(existing.split('\n').filter(Boolean));
+    const incoming = fs
+      .readFileSync(src, 'utf-8')
+      .split('\n')
+      .filter((line) => line && !known.has(line));
+    if (incoming.length > 0) {
+      const prefix = existing && !existing.endsWith('\n') ? '\n' : '';
+      fs.appendFileSync(dst, `${prefix}${incoming.join('\n')}\n`, { mode: 0o600 });
+    }
     fs.unlinkSync(src);
   } else if (st) {
     return; // unexpected entry type

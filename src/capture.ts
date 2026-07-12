@@ -28,7 +28,9 @@ export function snapshotAccount(
     return;
   }
 
-  fs.mkdirSync(targetDir, { recursive: true });
+  // 0700: the dir holds an OAuth token. The token file itself is 0600, but a
+  // world-listable directory still leaks which accounts exist on the machine.
+  fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
 
   // 1) Credentials — copy atomically (temp + rename).
   const dstCreds = path.join(targetDir, '.credentials.json');

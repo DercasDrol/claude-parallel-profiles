@@ -6,7 +6,7 @@ import { AccountRegistry } from './accounts';
 import { WindowBinding } from './binding';
 import { StatusBarManager } from './statusBar';
 import { SetupWizard, NOTICE_KEY } from './setupWizard';
-import { ensureSharedHistory, unshareHistory, sharedStoreDir } from './sharedHistory';
+import { ensureSharedHistory } from './sharedHistory';
 import { defaultSourceDir } from './capture';
 import { AccountWatcher } from './accountWatcher';
 import { allWorkingDirs, workingRoot } from './workdir';
@@ -112,43 +112,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await registry.discoverAndMerge();
   if (!bound) bound = binding.applyStored(resolveAccount);
 
-  // Shared history: symlink every account's projects/sessions/… to one store so
-  // a conversation survives an account switch. Do this BEFORE Claude Code reads
-  // the dir, otherwise the first paint of the panel would show empty history.
-  // With the setting off, the same pass reverts any leftover links to real
-  // copies, so toggling the setting (in either direction) is always honoured.
-  // Forgotten accounts' dirs are included: they stay on disk, so they must
-  // follow the shared-history mode too (especially the un-share pass —
-  // otherwise they'd keep dangling symlinks into the store).
-  // Working dirs MUST be in here: a window's conversations live in the dir it
-  // actually runs on, so without the links its history would be stranded there
-  // and appear to vanish the moment it switched account.
+  // One history, in one store, symlinked from every dir — the same single history
+  // vanilla Claude Code has. Do this BEFORE Claude Code reads the dir, otherwise
+  // the first paint of the panel would show empty history.
+  //
+  // This is not a "share between accounts" feature, it is what keeps history from
+  // being LOST: a window runs on its own working dir, which starts out empty, so
+  // without the links every conversation the user ever had (they live in the
+  // default ~/.claude) would simply disappear from the panel the moment this
+  // extension was installed. Hence no setting to turn it off — an off switch only
+  // ever meant "fragment my history across N directories", which is why it also
+  // used to copy the entire store into each of them.
+  //
+  // Forgotten accounts' dirs are included: they stay on disk and their history is
+  // the user's. Working dirs MUST be in here — a window's conversations live in
+  // the dir it actually runs on.
   const allDirs = (): string[] => [
     defaultSourceDir(),
     ...registry.list().map((a) => a.dir),
     ...registry.listForgotten().map((a) => a.dir),
     ...allWorkingDirs(),
   ];
-  const applySharedHistory = (announce: boolean): void => {
-    const on = vscode.workspace
-      .getConfiguration('claudeProfiles')
-      .get<boolean>('sharedHistory', true);
-    const warnings = on ? ensureSharedHistory(allDirs()) : unshareHistory(allDirs());
-    if (warnings.length > 0) {
-      vscode.window.showWarningMessage(
-        `Claude Accounts: shared history ${on ? 'migration' : 'restore'} hit ${warnings.length} issue(s); ` +
-          `will retry on next reload. First: ${warnings[0]}`
-      );
-    } else if (announce) {
-      vscode.window.showInformationMessage(
-        on
-          ? 'Claude Accounts: conversation history is now shared across accounts.'
-          : `Claude Accounts: history un-shared — each account got its own full copy. ` +
-            `The shared store (${sharedStoreDir()}) is kept as a backup; delete it manually if unwanted.`
-      );
-    }
-  };
-  applySharedHistory(false);
+  const warnings = ensureSharedHistory(allDirs());
+  if (warnings.length > 0) {
+    vscode.window.showWarningMessage(
+      `Claude Accounts: shared history migration hit ${warnings.length} issue(s); ` +
+        `will retry on next reload. First: ${warnings[0]}`
+    );
+  }
 
   log(
     `activated: env=${process.env.CLAUDE_CONFIG_DIR ?? '(default)'} ` +
@@ -191,10 +182,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     cmd('claudeProfiles.removeProfile', () => wizard.removeAccountInteractive()),
     cmd('claudeProfiles.showStatus', () => statusBar.onClick()),
     cmd('claudeProfiles.showLog', () => showLog()),
-    // React to the user flipping claudeProfiles.sharedHistory at runtime.
-    vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('claudeProfiles.sharedHistory')) applySharedHistory(true);
-    }),
     // Only the focused window repairs a dir whose account was replaced by a
     // sign-in (it's the window the user signed in from). So a window that was
     // unfocused while that happened must reconcile when focus comes back —

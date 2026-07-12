@@ -181,9 +181,7 @@ export class WindowBinding {
     // account — and fail to resume/fork any conversation recorded before the
     // bind ("Session … not found", the v1.2.0/1.2.1 incident). The activation
     // pass only covers dirs that exist at activation; this covers the gap.
-    if (vscode.workspace.getConfiguration('claudeProfiles').get<boolean>('sharedHistory', true)) {
-      ensureSharedHistory([dir]);
-    }
+    ensureSharedHistory([dir]);
     log(`bind: ${account.name} → ${dir} (was ${process.env[ENV_VAR] ?? '(default)'})`);
     process.env[ENV_VAR] = dir;
     this.applyTerminalEnv(dir);

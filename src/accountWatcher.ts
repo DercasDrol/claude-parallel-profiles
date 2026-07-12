@@ -30,11 +30,18 @@ export class AccountWatcher implements vscode.Disposable {
     // Watch the identity file backing this window's account: the bound dir's
     // .claude.json, or — for an unbound window — the home-root ~/.claude.json
     // where the default account keeps its identity. watchFile (poll-based)
-    // survives the atomic temp+rename writes that break fs.watch.
+    // survives the atomic temp+rename writes that break fs.watch, and fires on
+    // deletion too.
+    //
+    // The TOKEN file is watched as well, and it's the one that actually decides
+    // whether this window is signed in: a `/logout`, or a forget performed in
+    // ANOTHER window, deletes `.credentials.json` while the identity file stays
+    // behind. Without this the bar would keep showing the account as live.
     const dir = this.binding.getEnvDir() ?? defaultSourceDir();
     const files = new Set<string>([
       path.join(dir, '.claude.json'),
       path.join(os.homedir(), '.claude.json'),
+      path.join(dir, '.credentials.json'),
     ]);
     for (const f of files) {
       fs.watchFile(f, { interval: 2000 }, () => this.schedule());

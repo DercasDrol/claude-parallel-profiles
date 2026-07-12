@@ -1,0 +1,36 @@
+# Changelog
+
+## 1.2.3 — 2026-07-12
+
+The per-window architecture release: account isolation is now structural, not heuristic.
+
+### Added
+- **Per-window working directories.** Each window runs a private copy (`~/.claude-windows/<id>`) of its account's store, so a `/login` can only ever affect the window it happened in — no shared state, no focus guessing, no races.
+- **Auto-save.** A signed-in account is saved the moment it's noticed; the separate "save" step is no longer required (the command remains for manual use).
+- **Forceful forget.** Forgetting an account now deletes its OAuth token from every copy on the machine, interrupts live `claude` sessions running on it, and reloads any window that used it — with a confirmation up front and a "Switch account" offer after.
+- **Logout handling.** `/logout` revokes the token server-side, so the account is removed from the list everywhere instead of lingering as a dead entry.
+- **Terminals follow the window.** Integrated terminals get the window's account via VSCode's environment-variable collection.
+- **Status bar hover card** with the extension's name, account details, actions, and quick links to Settings, the extension page, and the log (new *Show Log* command).
+- **Reload circuit breaker.** All automatic window reloads correct their trigger state first and are capped at one per minute — a misbehaving edge degrades to a message with a manual button, never a reload loop.
+- **Manifest self-restrictions:** disabled in virtual workspaces; limited (content never read, settings not overridable) in Restricted Mode.
+- Signed-out windows offer one-click switching to a saved account (status bar click, notices, hover).
+
+### Fixed
+- Infinite reload loop after forgetting the account a window was running.
+- Switching appearing to do nothing after an in-window `/login` (the window now fully reloads onto the new account; the old one stays in the list).
+- Newly added accounts not appearing in other windows until restart (the registry now converges on the on-disk stores).
+- A fresh login taking ~30 s to be saved (identity is read from disk instead of spawning the CLI).
+- A failed working-copy stocking is no longer mistaken for a logout (which used to drop a perfectly good account).
+- Uninstall now also reverts the nested per-window directories and removes their token copies.
+
+## 1.1.5 — 2026-07-12
+
+- Reliable per-window switching: activation-order fix (the extension now sets `CLAUDE_CONFIG_DIR` before Claude Code reads it), machine-wide setting overrides stripped, identity confirmed against the real token.
+
+## 1.0.5 — 2026-07-12
+
+- Rework into per-window parallel accounts with a shared conversation history store (`~/.claude-shared`) and clean uninstall.
+
+## 1.0.0 — 2026-07-12
+
+- Initial release: capture, switch and isolate Claude Code accounts per VSCode window.

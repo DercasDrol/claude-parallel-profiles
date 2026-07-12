@@ -153,9 +153,26 @@ export class AccountRegistry {
     await this.context.globalState.update(REGISTRY_KEY, list);
   }
 
+  /**
+   * Drops entries whose store has been signed out — the account no longer exists.
+   *
+   * This is what makes the account list agree across windows. `globalState` does
+   * NOT propagate between them: each extension host holds its own copy, so an
+   * account saved (or forgotten) in one window is invisible to the others until
+   * they restart. The DISK is the only shared truth — an account IS its store —
+   * so pairing this with discoverAndMerge() lets every window converge on it:
+   * new accounts appear, and signed-out ones disappear.
+   */
+  async pruneSignedOut(): Promise<Account[]> {
+    const gone = this.list().filter((a) => !hasCredentials(a.dir));
+    for (const a of gone) await this.remove(a.name);
+    return gone;
+  }
+
   listForgotten(): Account[] {
     return this.context.globalState.get<Account[]>(FORGOTTEN_KEY, []);
   }
+
 
   /** Moves an account from the registry to the forgotten list. Dir stays on disk. */
   async forget(account: Account): Promise<void> {
@@ -201,6 +218,10 @@ export class AccountRegistry {
       // so it isn't a self-contained account.
       const m = /^\.claude[-_](.+)$/.exec(e.name);
       if (!m) continue;
+      // These hold other things in SUBdirs, not an account of their own:
+      // `.claude-windows` the per-window working copies, `.claude-shared` the
+      // history store. Adopting either would invent a phantom account.
+      if (m[1] === 'windows' || m[1] === 'shared') continue;
       const dir = path.join(home, e.name);
       if (!hasCredentials(dir)) continue;
       // Explicitly forgotten dirs stay on disk — do not resurrect them.

@@ -2,310 +2,498 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { Account, AccountRegistry, readIdentity } from './accounts';
+import { Account, AccountRegistry, readIdentity, hasCredentials } from './accounts';
 import { WindowBinding } from './binding';
-import { getAuthStatus } from './cli';
+import { getAuthStatus, AuthStatus } from './cli';
 import { snapshotAccount, defaultSourceDir } from './capture';
 import { ensureSharedHistory } from './sharedHistory';
+import { signOut, interruptSessions, dirsHoldingToken } from './reclaim';
+import { refreshStore, allWorkingDirs, materialize } from './workdir';
+import { log } from './log';
 
 /**
- * User-facing flows, all driven from the extension — no terminal/CLI login.
- * You sign in / switch accounts using Claude Code's own UI; this extension
- * captures whatever account is currently active into a named account, and lets
- * you bind each window to one.
+ * All the user-facing flows.
+ *
+ * The model, in one paragraph: an ACCOUNT is a store on disk (`~/.claude-<name>`)
+ * plus its entry in the registry. A WINDOW never points at a store — it points at
+ * a working dir of its own, stocked with a copy of the account it runs (see
+ * workdir.ts for why that separation is load-bearing). Signing in inside a window
+ * therefore rewrites only that window's working dir, and reconcile() simply
+ * follows it: whatever account the window's dir now holds is the account that
+ * window runs. Nothing else on disk, and no other window, is affected.
  */
+
+/**
+ * A message to show AFTER a window reload. A reload kills any toast raised just
+ * before it, so news that has to outlive one goes here.
+ */
+export const NOTICE_KEY = 'claudeProfiles.pendingNotice';
+
+/** workspaceState: when this window last reloaded itself automatically. */
+const RELOAD_STAMP_KEY = 'claudeProfiles.lastAutoReload';
+
 export class SetupWizard {
   constructor(
     private readonly registry: AccountRegistry,
-    private readonly binding: WindowBinding
+    private readonly binding: WindowBinding,
+    private readonly context: vscode.ExtensionContext
   ) {}
 
-  // ─── Capture the currently-signed-in account ────────────────────────────────
+  /**
+   * The ONLY way any flow in this extension reloads the window.
+   *
+   * Auto-reloads are decided from state that SURVIVES the reload (disk,
+   * workspaceState), so a bug that leaves the trigger state in place turns
+   * "reload to recover" into a reload LOOP — v1.2.1 shipped exactly that.
+   * Two lines of defence, both mandatory:
+   *
+   *   1. Every auto-reload site must change the state it triggered on BEFORE
+   *      calling this, so the same condition cannot re-fire after the reload.
+   *   2. The circuit breaker here: at most one AUTOMATIC reload per minute per
+   *      window (the stamp lives in workspaceState, so it survives the reload).
+   *      A second one inside that minute degrades to a message with a manual
+   *      "Reload window" button — which breaks any loop a future bug could
+   *      still construct, at the cost of one extra click.
+   *
+   * `userInitiated` bypasses the breaker (an explicit switch/forget must always
+   * act) but still stamps, so a follow-up automatic reload is metered.
+   */
+  private async requestWindowReload(
+    notice: string | undefined,
+    opts: { userInitiated?: boolean } = {}
+  ): Promise<void> {
+    const now = Date.now();
+    const last = this.context.workspaceState.get<number>(RELOAD_STAMP_KEY, 0);
+    if (!opts.userInitiated && now - last < 60_000) {
+      log(`auto-reload SUPPRESSED (${now - last}ms after the previous one): ${notice ?? ''}`);
+      void vscode.window
+        .showWarningMessage(
+          `Claude Accounts: ${notice ?? 'this window needs a reload to pick up its account.'} ` +
+            `The automatic reload was skipped because one just happened.`,
+          'Reload window'
+        )
+        .then((pick) => {
+          if (pick === 'Reload window') {
+            void vscode.commands.executeCommand('workbench.action.reloadWindow');
+          }
+        });
+      return;
+    }
+    await this.context.workspaceState.update(RELOAD_STAMP_KEY, now);
+    if (notice) await this.context.globalState.update(NOTICE_KEY, notice);
+    await vscode.commands.executeCommand('workbench.action.reloadWindow');
+  }
 
   /**
-   * Reads the account Claude Code is currently signed in as (in this window's
-   * data dir) and saves it. The email IS the account's identity — no name to
-   * type: the directory slug is derived from it, and duplicates are detected
-   * by email (a second snapshot of the same account would fork its OAuth
-   * token, and a later refresh in one copy can invalidate the other).
+   * "Your account is gone — here's what to do next", with the do-it button
+   * attached: a bare "sign in" message when saved accounts exist reads as a
+   * dead end, even though switching is one click away.
+   */
+  private offerAccountPick(reason: string): void {
+    const hasAccounts = this.registry.listUniqueByEmail().length > 0;
+    void vscode.window
+      .showInformationMessage(
+        `Claude Accounts: ${reason} ${
+          hasAccounts
+            ? 'Pick another saved account, or sign in with Claude Code (/login).'
+            : 'Sign in with Claude Code (/login).'
+        }`,
+        ...(hasAccounts ? ['Switch account'] : [])
+      )
+      .then((pick) => {
+        if (pick === 'Switch account') {
+          void vscode.commands.executeCommand('claudeProfiles.switchAccount');
+        }
+      });
+  }
+
+  // ─── Saving the account a window is signed in as ────────────────────────────
+
+  /**
+   * Saves the account currently signed in inside `sourceDir` and binds this
+   * window to it. The email IS the account's identity — nothing to name, and an
+   * account already known by that email is reused rather than copied again, so
+   * signing in twice as the same user can never mint a duplicate.
    *
-   * Returns the saved (or reused) account, or undefined if nothing was saved.
-   * With `quiet`, success toasts are suppressed (for composite flows like
-   * save-then-switch); warnings are always shown. `sourceDir` overrides where
-   * the account is read from — used to "adopt" whatever account Claude Code
-   * just signed into (which always lands in the default dir), regardless of
-   * what this window is currently bound to.
+   * `silent` suppresses even the "not signed in" warning: reconcile() calls this
+   * on a timer, where a signed-out dir is a normal state and not an error.
    */
   async captureCurrentAccount(
-    opts: { quiet?: boolean; sourceDir?: string } = {}
+    opts: { quiet?: boolean; sourceDir?: string; silent?: boolean } = {}
   ): Promise<Account | undefined> {
     const sourceDir = opts.sourceDir ?? this.binding.getEnvDir() ?? defaultSourceDir();
 
-    const status = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'Reading current Claude account…' },
-      () => getAuthStatus(sourceDir)
-    );
+    // The identity file already names the account, and the token file next to it
+    // says it's signed in — that's everything we need. Asking the CLI instead
+    // means spawning a login shell and a 250MB binary, whose cold start is why a
+    // freshly signed-in account used to take half a minute to show up. The CLI is
+    // still used for the deliberate "Save current account" command, where the user
+    // is waiting on an answer and a definitive check is worth the wait.
+    const identity = readIdentity(sourceDir);
+    const status: AuthStatus | null =
+      opts.silent && identity && hasCredentials(sourceDir)
+        ? { loggedIn: true, email: identity.email, orgName: identity.organizationName }
+        : await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: 'Reading current Claude account…' },
+            () => getAuthStatus(sourceDir)
+          );
 
     if (!status?.loggedIn || !status.email) {
-      vscode.window.showWarningMessage(
-        'No signed-in Claude account detected in this window. Sign in with Claude Code first ' +
-          '(Account menu → Login, or /login in a chat), then run "Save current account".'
-      );
+      if (!opts.silent) {
+        vscode.window.showWarningMessage(
+          'No signed-in Claude account detected in this window. Sign in with Claude Code first ' +
+            '(Account menu → Login, or /login in a chat).'
+        );
+      }
       return undefined;
     }
 
-    // Already registered as this exact dir? Refresh its email and make sure
-    // this window is actually bound to it (saving must never leave the window
-    // in the "unsaved/unbound" state).
-    const existingByDir = this.registry.getByDir(sourceDir);
-    if (existingByDir) {
-      existingByDir.email = status.email;
-      await this.registry.add(existingByDir);
-      await this.binding.bind(existingByDir);
+    // Known account? Reuse its store — never a second copy of the same email.
+    // Take the opportunity to freshen the store with the token now in use.
+    const known = this.registry.savedForEmail(status.email);
+    if (known) {
+      known.email = status.email;
+      await this.registry.add(known);
+      refreshStore(known, sourceDir);
+      await this.binding.bind(known);
       if (!opts.quiet) {
-        vscode.window.showInformationMessage(
-          `${status.email} is already saved — this window is bound to it.`
-        );
+        vscode.window.showInformationMessage(`${status.email} — this window is bound to it.`);
       }
-      return existingByDir;
+      return known;
     }
 
-    // Same email already saved under another dir? Reuse it instead of taking a
-    // second snapshot: two copies of one OAuth token invalidate each other on
-    // refresh, which surfaces to the user as a random sign-out.
-    const existingByEmail = this.registry
-      .list()
-      .find((a) => (a.email ?? readIdentity(a.dir)?.email) === status.email);
-    if (existingByEmail) {
-      // Refresh the saved copy's credentials from the live source before
-      // rebinding, so we never land the window on a stale token.
-      try {
-        snapshotAccount(sourceDir, existingByEmail.dir, status);
-      } catch {
-        /* keep the existing copy as-is */
-      }
-      await this.binding.bind(existingByEmail);
-      if (!opts.quiet) {
-        vscode.window.showInformationMessage(
-          `${status.email} is already saved — this window now uses that copy.`
-        );
-      }
-      return existingByEmail;
-    }
-
-    // A previously forgotten copy of this account? Restore it — its dir is
-    // still on disk (forget deletes nothing), and a fresh snapshot would fork
-    // the OAuth token.
+    // Forgotten before? Its store is still on disk (forget signs it out, it never
+    // deletes), so restore the entry instead of inventing a second one.
     const restored = await this.registry.restoreForgotten(status.email);
-    if (restored) {
-      try {
-        snapshotAccount(sourceDir, restored.dir, status); // refresh credentials
-      } catch {
-        /* keep the existing copy as-is */
-      }
-      if (vscode.workspace.getConfiguration('claudeProfiles').get<boolean>('sharedHistory', true)) {
-        ensureSharedHistory([restored.dir]);
-      }
-      await this.binding.bind(restored);
-      if (!opts.quiet) {
-        vscode.window.showInformationMessage(
-          `${status.email} was restored from the forgotten list — this window is bound to it.`
+    const target: Account =
+      restored ??
+      (() => {
+        const name = suggestName(
+          status.email!,
+          (n) => !this.registry.get(n) && !fs.existsSync(path.join(os.homedir(), `.claude-${n}`))
         );
-      }
-      return restored;
-    }
+        return { name, dir: path.join(os.homedir(), `.claude-${name}`), email: status.email };
+      })();
 
-    // No name prompt: the email is the identity, the dir slug derives from it.
-    // A slug is free only if no registry entry uses it AND its dir doesn't
-    // already exist on disk (an unregistered leftover must not be overwritten).
-    const name = suggestName(
-      status.email,
-      (n) => !this.registry.get(n) && !fs.existsSync(path.join(os.homedir(), `.claude-${n}`))
-    );
-    const targetDir = path.join(os.homedir(), `.claude-${name}`);
     try {
-      snapshotAccount(sourceDir, targetDir, status);
+      snapshotAccount(sourceDir, target.dir, status);
     } catch (err) {
       vscode.window.showErrorMessage(`Could not save account: ${(err as Error).message}`);
       return undefined;
     }
-
-    // Give the new account dir the shared history links right away, so
-    // switching to it continues the current conversation instead of resetting.
     if (vscode.workspace.getConfiguration('claudeProfiles').get<boolean>('sharedHistory', true)) {
-      ensureSharedHistory([targetDir]);
+      ensureSharedHistory([target.dir]);
     }
-
-    // Verify the snapshot authenticates as the same account.
-    const check = await getAuthStatus(targetDir, 8000);
-    if (check && check.email && check.email !== status.email) {
-      vscode.window.showWarningMessage(
-        `Saved, but the copy reports ${check.email} instead of ${status.email}. ` +
-          'The source credentials may have changed mid-capture.'
-      );
-    }
-
-    const account: Account = { name, dir: targetDir, email: status.email };
-    await this.registry.add(account);
-    // Bind immediately: the user saved the account this window is running on,
-    // so the window should end up attached to the saved copy — same account,
-    // same conversations (shared history), but now possible to return to.
-    await this.binding.bind(account);
+    target.email = status.email;
+    await this.registry.add(target);
+    await this.binding.bind(target);
     if (!opts.quiet) {
-      vscode.window.showInformationMessage(
-        `Saved ${status.email} — this window is now bound to it.`
-      );
+      vscode.window.showInformationMessage(`Saved ${status.email} — this window is bound to it.`);
     }
-    return account;
+    return target;
   }
 
-  // ─── Switch the current window's account ────────────────────────────────────
+  // ─── Keeping the window in step with what's on disk ─────────────────────────
+
+  /**
+   * Guards against overlapping runs. reconcile() is driven by three independent
+   * triggers (activation, the file poll, window focus) and does slow async work,
+   * so two runs in flight would save the same account twice.
+   */
+  private reconciling?: Promise<void>;
+
+  async reconcile(opts: { atActivation?: boolean } = {}): Promise<void> {
+    if (this.reconciling) return this.reconciling;
+    this.reconciling = this.reconcileOnce(opts).finally(() => {
+      this.reconciling = undefined;
+    });
+    return this.reconciling;
+  }
+
+  private async reconcileOnce(opts: { atActivation?: boolean }): Promise<void> {
+    // Re-read the account list off disk first. `globalState` is per-extension-host,
+    // so an account saved or forgotten in ANOTHER window is invisible here until
+    // this one restarts — which is why a newly added account never showed up in the
+    // other window's Switch list. The stores on disk are the shared truth, so every
+    // window converges on them: discover what appeared, drop what was signed out.
+    await this.registry.discoverAndMerge();
+    await this.registry.pruneSignedOut();
+
+    // Once bound, this is the window's OWN working dir: no other window writes to
+    // it, so everything below concerns this window alone. Before the first bind
+    // it is still the default dir — that's where Claude Code is signed in out of
+    // the box, and where a brand-new user's account is found.
+    const dir = this.binding.getEnvDir() ?? defaultSourceDir();
+    const onDefault = path.normalize(dir) === path.normalize(defaultSourceDir());
+
+    if (!hasCredentials(dir)) {
+      const active = this.binding.getActiveName();
+
+      // The account is gone from disk entirely — it was FORGOTTEN, most likely from
+      // another window (there is no API to reload someone else's window, so this is
+      // how the news reaches us).
+      if (active && !this.registry.get(active)) {
+        // Release FIRST: the stale name survives a reload (workspaceState, repo
+        // map), and reloading with it in place re-enters this branch forever.
+        const wasRunningIt = Boolean(this.binding.getEnvDir());
+        await this.binding.release();
+        if (wasRunningIt) {
+          // The window is sitting on a dir we just found emptied, with a dead
+          // session and a panel naming an account that no longer exists —
+          // nothing here worth keeping, so reload rather than ask.
+          await this.requestWindowReload(
+            `The account this window was running was forgotten and signed out.`
+          );
+        } else {
+          // The window merely REMEMBERED the forgotten account (it was closed
+          // when the forget happened, so applyStored never bound it). Nothing
+          // is running on it and a reload would change nothing — just point
+          // the user at the way forward.
+          this.offerAccountPick(`The account this window last used was forgotten and signed out.`);
+        }
+        return;
+      }
+
+      // Signed out, but the account still exists on disk ⇒ the user ran /logout in
+      // THIS window. Careful, though: a dir is ALSO tokenless for the whole time a
+      // sign-in is in flight — Claude Code deletes the old credentials before it
+      // sends the user to the browser — and at this instant the two are
+      // indistinguishable. Treating a sign-in as a logout would sign out a
+      // perfectly good account while the user is away authorising.
+      //
+      // At ACTIVATION there is no ambiguity: an OAuth flow cannot survive a window
+      // reload, so a dir still tokenless when the window comes up really is logged
+      // out. That is the only moment it is safe to conclude anything.
+      if (opts.atActivation) await this.handleLoggedOut(dir);
+      return;
+    }
+    const email = readIdentity(dir)?.email;
+    if (!email) return; // token but no identity yet — a sign-in mid-flight
+
+    const active = this.binding.getActiveName();
+    const bound = active ? this.registry.get(active) : undefined;
+    if (bound?.email && bound.email !== email) {
+      // The user signed in as someone else, in THIS window. There is nothing to
+      // repair: the dir is this window's alone, so no other window was touched,
+      // and the account that was here is safe in its own store — untouched,
+      // because a window only ever runs a copy. Just follow the user.
+      //
+      // This is the payoff of per-window dirs. It used to take a shadow copy, a
+      // restore, a guess at which window signed in, and a forced reload.
+      log(`sign-in in this window: ${bound.email} → ${email}`);
+    }
+
+    const account =
+      this.registry.savedForEmail(email) ??
+      (await this.captureCurrentAccount({ quiet: true, silent: true, sourceDir: dir }));
+    if (!account) return;
+
+    // Keep the store's token from drifting far behind the one actually in use.
+    refreshStore(account, dir);
+    const changed = active !== account.name;
+    if (changed) await this.binding.bind(account);
+
+    // First run only: the window was still on the shared DEFAULT dir. It is bound
+    // now, but Claude Code read the default at activation and won't look again —
+    // so until a reload it keeps running there, where another window's sign-in
+    // could still reach it. One reload moves it onto its own dir for good.
+    if (onDefault) {
+      await this.requestWindowReload(
+        `${email} is set up. This window now runs it in a directory of its own — signing in to ` +
+          `another account here will no longer disturb your other windows.`
+      );
+    } else if (changed && active) {
+      // The user signed in as a different account INSIDE this window. The bind
+      // above only updates our side; Claude Code read this dir at activation and
+      // won't look again — its panel still shows, and its running session still
+      // bills, the OLD account. Without this reload the window looks switched
+      // but isn't, and the Switch list marks the new account as "current" so
+      // picking it is a no-op: "switch does nothing until I reload by hand".
+      await this.requestWindowReload(
+        `Signed in as ${email} — the window was reloaded so Claude Code fully switches to it.`
+      );
+    }
+  }
+
+  /**
+   * The user ran `/logout` in this window. That REVOKES the refresh token on
+   * Anthropic's side — not just locally — so every copy of it is now a dead
+   * credential, the account's store included. Leaving the account in the list
+   * would be a lie: switching to it later would look signed in and fail on the
+   * first request. Sign its store out and drop it, exactly as Forget would.
+   *
+   * Its data dir stays (nothing is deleted), so signing in again brings it back.
+   */
+  private async handleLoggedOut(dir: string): Promise<void> {
+    const active = this.binding.getActiveName();
+    const account = active ? this.registry.get(active) : undefined;
+    if (!account) return;
+
+    // A REAL logout deletes the token, clears oauthAccount from the dir's
+    // config, and leaves that config file in place (Claude Code's own routine).
+    // Anything else — identity still present, or no config file at all — is not
+    // a logout but a working copy that failed to stock (an interrupted copy, a
+    // full disk). The store is intact, so restock it; concluding "logout" here
+    // would forget — and sign out — a perfectly good account over an IO hiccup.
+    const looksLikeRealLogout =
+      !readIdentity(dir) && fs.existsSync(path.join(dir, '.claude.json'));
+    if (!looksLikeRealLogout && hasCredentials(account.dir)) {
+      log(`working dir ${dir} lost its token but kept its identity — restocking from ${account.name}`);
+      materialize(account, dir, true);
+      await this.requestWindowReload(
+        `Restored ${this.registry.emailOf(account) ?? account.name} for this window.`
+      );
+      return;
+    }
+    const email = this.registry.emailOf(account) ?? account.name;
+    log(`logged out of ${email} in this window — its token is revoked everywhere`);
+
+    await this.registry.forget(account);
+    await this.binding.forget(account);
+    signOut(account.dir);
+    for (const d of allWorkingDirs()) {
+      if (readIdentity(d)?.email === email) signOut(d);
+    }
+    vscode.window.showInformationMessage(
+      `Claude Accounts: you signed out of ${email}, so it was removed from the list — a logout ` +
+        `revokes the account everywhere, not just in this window. Sign in again to bring it back.`
+    );
+  }
+
+  // ─── Switching this window's account ────────────────────────────────────────
 
   async switchAccountInteractive(): Promise<void> {
     const accounts = this.registry.listUniqueByEmail();
     if (accounts.length === 0) {
-      const pick = await vscode.window.showInformationMessage(
-        'No saved accounts yet. Sign in with Claude Code, then save the current account.',
-        'Save current account'
+      vscode.window.showInformationMessage(
+        'No accounts yet. Sign in with Claude Code and this window will remember the account automatically.'
       );
-      if (pick === 'Save current account') await this.captureCurrentAccount();
       return;
     }
 
     const activeName = this.binding.getActiveName();
-    const currentDir = this.binding.getEnvDir() ?? defaultSourceDir();
-    const currentEmail = readIdentity(currentDir)?.email;
-    type Item = vscode.QuickPickItem & { account?: Account; capture?: boolean };
-    // The email is the account's identity — lead with it; the dir is detail.
+    type Item = vscode.QuickPickItem & { account: Account };
     const items: Item[] = accounts.map((a) => ({
       label: `${a.name === activeName ? '$(check) ' : '$(account) '}${this.registry.emailOf(a) ?? a.name}`,
       description: a.name === activeName ? 'current' : '',
-      detail: a.dir,
       account: a,
     }));
-    // Offer saving only when the current account (by email) isn't saved yet.
-    if (currentEmail && !this.registry.savedForEmail(currentEmail)) {
-      items.push({ label: '$(save) Save current account…', capture: true });
-    }
 
     const picked = await vscode.window.showQuickPick(items, {
       title: 'Switch Claude account for this window (reloads the window)',
       placeHolder: 'Pick the account this window should use',
     });
     if (!picked) return;
-    if (picked.capture) {
-      await this.captureCurrentAccount();
+    if (picked.account.name === activeName) {
+      // Never a silent no-op: to the user a click that does nothing is a bug.
+      vscode.window.showInformationMessage(
+        `${this.registry.emailOf(picked.account) ?? picked.account.name} is already this window's account.`
+      );
       return;
     }
-    if (picked.account) {
-      if (!(await this.maybeSaveCurrentBeforeSwitch(picked.account))) return; // cancelled
-      await this.switchTo(picked.account);
-    }
+    await this.switchTo(picked.account);
   }
 
   /**
-   * If the account this window is currently using isn't saved, switching away
-   * would leave the user no way back to it from this extension. Offer to save
-   * it first. Returns false if the user cancelled the switch entirely.
-   */
-  private async maybeSaveCurrentBeforeSwitch(target: Account): Promise<boolean> {
-    const dir = this.binding.getEnvDir() ?? defaultSourceDir();
-    if (path.normalize(dir) === path.normalize(target.dir)) return true;
-    const email = readIdentity(dir)?.email;
-    if (!email) return true; // not signed in — nothing to save
-    if (this.registry.savedForEmail(email)) return true; // already saved — nothing to lose
-    const pick = await vscode.window.showWarningMessage(
-      `The account this window uses now (${email}) is not saved. ` +
-        `If you switch without saving, this extension won't be able to switch back to it.`,
-      { modal: true },
-      'Save it, then switch',
-      'Switch without saving'
-    );
-    if (!pick) return false;
-    if (pick === 'Save it, then switch') {
-      // If saving failed or was aborted, do NOT proceed: the user explicitly
-      // chose to keep a way back to this account.
-      const saved = await this.captureCurrentAccount({ quiet: true });
-      return Boolean(saved);
-    }
-    return true;
-  }
-
-  /**
-   * Binds the window to the account, then reloads it.
+   * Stocks this window's working dir with the account and reloads.
    *
-   * The reload is NOT optional: Claude Code reads the account (identity shown in
-   * its panel) from `process.env.CLAUDE_CONFIG_DIR` only when its extension host
-   * activates, and it keeps a long-lived session process — so a live env change
-   * is invisible to it. Its identity and the billed token only move to the new
-   * account after a fresh activation. On reload our extension (activated on `*`,
-   * before Claude Code) re-applies the binding first, so Claude Code reads the
-   * new account for BOTH the shown identity and the token.
+   * The reload is not a nicety: Claude Code reads CLAUDE_CONFIG_DIR once, when its
+   * extension host activates, and keeps a long-lived process — a live swap would
+   * be invisible to it, leaving the panel showing one account while every request
+   * billed another. On reload this extension activates first (activation event
+   * `*`) and the new account is already in place.
    */
   async switchTo(account: Account): Promise<void> {
     await this.binding.bind(account);
-    await vscode.commands.executeCommand('workbench.action.reloadWindow');
+    await this.requestWindowReload(undefined, { userInitiated: true });
   }
 
-  // ─── Remove an account ──────────────────────────────────────────────────────
+  // ─── Forgetting an account ──────────────────────────────────────────────────
 
   async removeAccountInteractive(): Promise<void> {
     const accounts = this.registry.listUniqueByEmail();
     if (accounts.length === 0) {
-      vscode.window.showInformationMessage('No accounts to remove.');
+      vscode.window.showInformationMessage('No accounts to forget.');
       return;
     }
     const picked = await vscode.window.showQuickPick(
       accounts.map((a) => ({
-        label: a.email ?? readIdentity(a.dir)?.email ?? a.name,
+        label: this.registry.emailOf(a) ?? a.name,
         description: a.dir,
         account: a,
       })),
-      { title: 'Forget a saved account', placeHolder: 'Pick a saved account to forget (your Claude account itself is untouched)' }
+      {
+        title: 'Forget a saved account',
+        placeHolder: 'Pick an account to sign out and remove from the list',
+      }
     );
     if (!picked) return;
 
-    // Forgetting is deliberately non-destructive: the extension's list and the
-    // Claude Code data are separate worlds. The dir (credentials, settings,
-    // any unshared history) stays on disk, running conversations keep working,
-    // and re-saving the same email later restores the entry.
-    const email = picked.account.email ?? picked.account.name;
-    const usedHere = this.binding.getActiveName() === picked.account.name;
+    const email = this.registry.emailOf(picked.account) ?? picked.account.name;
     const choice = await vscode.window.showWarningMessage(
-      `Forget ${email}? It only disappears from this extension's list — the Claude account stays ` +
-        `signed in, running conversations keep working, and its data directory remains on disk ` +
-        `(${picked.account.dir}). Saving the same account later restores it.` +
-        (usedHere ? '\n\nThis window is currently using it and will fall back to the default account.' : ''),
+      `Forget ${email}?\n\n` +
+        `• It's removed from this extension's list.\n` +
+        `• Its OAuth token is deleted from every copy on disk — the account is signed out ` +
+        `everywhere, including any window running it.\n` +
+        `• Active Claude Code sessions on it, in ANY window, are interrupted.\n` +
+        `• History, settings and its data folder stay on disk; signing in again restores it.`,
       { modal: true },
       'Forget'
     );
     if (choice !== 'Forget') return;
 
-    // Forget EVERY saved copy of this email — the old paradigm may have snapshot
-    // the same account into several dirs, and the user expects "forget X" to
-    // remove all of them, not leave a duplicate behind. All dirs stay on disk.
-    const targetEmail = this.registry.emailOf(picked.account);
     const copies = this.registry
       .list()
-      .filter((a) => (targetEmail ? this.registry.emailOf(a) === targetEmail : a.name === picked.account.name));
+      .filter((a) => this.registry.emailOf(a) === this.registry.emailOf(picked.account));
+
+    // Was THIS window running it? Decide before the binding is released.
+    const usedHere = copies.some((c) => c.name === this.binding.getActiveName());
+
     for (const copy of copies) {
       await this.registry.forget(copy);
-      // Release every reference: this window's env (so it really falls back to
-      // the default) and the repo→account memory of every folder pointing at it.
       await this.binding.forget(copy);
     }
-    vscode.window.showInformationMessage(
-      `Forgot ${email}. Its data ${copies.length > 1 ? 'directories remain' : 'directory remains'} on disk — save the account again to restore it.`
+
+    // Sign the account out of EVERY dir holding it: its store, the default dir
+    // (where a sign-in may have left the original), and every window's working
+    // copy. Missing any one of them leaves the account still signed in somewhere,
+    // and a reloaded window would quietly restore itself from it.
+    const dirs = [
+      ...dirsHoldingToken(email),
+      ...allWorkingDirs().filter((d) => readIdentity(d)?.email === email),
+    ];
+    // Kill live sessions FIRST, and with SIGKILL: on a graceful shutdown Claude
+    // Code flushes its in-memory token back to disk, undoing the delete.
+    const interrupted = interruptSessions(dirs);
+    let signedOut = 0;
+    for (const dir of dirs) if (signOut(dir)) signedOut++;
+
+    const parts = [`Forgot ${email}.`];
+    parts.push(
+      signedOut > 0
+        ? `Signed it out of ${signedOut} ${signedOut > 1 ? 'directories' : 'directory'}; history and settings stay on disk.`
+        : `Its data stays on disk — sign in again to restore it.`
     );
+    if (interrupted > 0) {
+      parts.push(`Interrupted ${interrupted} active session${interrupted > 1 ? 's' : ''}.`);
+    }
+
+    // If this window was running it, reload: Claude Code only reads its account at
+    // activation, so otherwise the window sits on a dir we just emptied, with a
+    // dead session and a panel still naming an account that no longer exists.
+    if (usedHere) {
+      await this.requestWindowReload(parts.join(' '), { userInitiated: true });
+      return;
+    }
+    vscode.window.showInformationMessage(parts.join(' '));
   }
 }
 
 /**
- * Derives a directory slug from an email. Tries the local part first; if that
- * is taken (same local part, different domain — daniil@gmail.com vs
- * daniil@work.dev), disambiguates with the domain instead of an opaque
- * counter: `daniil`, then `daniil-work-dev`. A numeric suffix is the last
- * resort only.
+ * Derives a directory slug from an email. Tries the local part first; if that is
+ * taken (same local part, different domain — daniil@gmail.com vs daniil@work.dev)
+ * it disambiguates with the domain rather than an opaque counter: `daniil`, then
+ * `daniil-work-dev`. A numeric suffix is the last resort only.
  */
 function suggestName(email: string, available: (n: string) => boolean): string {
   const slug = (s: string) =>

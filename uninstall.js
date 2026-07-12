@@ -24,20 +24,69 @@ const SHARED_ENTRIES = [
   'history.jsonl',
 ];
 
+/** The per-window working dirs this extension creates (~/.claude-windows/<id>). */
+function workingDirs(home) {
+  try {
+    const root = path.join(home, '.claude-windows');
+    return fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => path.join(root, e.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Working dirs are ours, not the user's: each is a COPY of an account, made only
+ * so that two windows never share one directory. Once the extension is gone
+ * nothing points at them, and each holds a duplicate of a live OAuth token — so
+ * the tokens go. The dirs themselves are left (their history has just been turned
+ * back into real files, and deleting user data on uninstall is not our call).
+ */
+function dropWorkingCredentials(home) {
+  for (const dir of workingDirs(home)) {
+    try {
+      fs.rmSync(path.join(dir, '.credentials.json'), { force: true });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
 function main() {
   const home = os.homedir();
+  // A short-lived earlier version kept credential copies here. Never leave tokens.
+  try {
+    fs.rmSync(path.join(home, '.claude-vault'), { recursive: true, force: true });
+  } catch {
+    // best-effort
+  }
+
   const store = path.join(home, '.claude-shared');
-  if (!fs.existsSync(store)) return; // sharing was never enabled
+  if (!fs.existsSync(store)) {
+    dropWorkingCredentials(home); // still ours to clean up, sharing or not
+    return;
+  }
 
   let dirs = [];
   try {
     dirs = fs
       .readdirSync(home, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && /^\.claude([-_].+)?$/.test(e.name) && e.name !== '.claude-shared')
+      .filter(
+        (e) =>
+          e.isDirectory() &&
+          /^\.claude([-_].+)?$/.test(e.name) &&
+          e.name !== '.claude-shared' &&
+          e.name !== '.claude-windows'
+      )
       .map((e) => path.join(home, e.name));
   } catch {
     return;
   }
+  // Working dirs are nested one level deeper, so the scan above misses them — and
+  // they are exactly the dirs a window's conversations actually live in.
+  dirs = dirs.concat(workingDirs(home));
 
   for (const dir of dirs) {
     for (const name of SHARED_ENTRIES) {
@@ -55,6 +104,10 @@ function main() {
       }
     }
   }
+
+  // Only after the history is real files again — otherwise a working dir would be
+  // stripped of its token while its conversations were still dangling symlinks.
+  dropWorkingCredentials(home);
 }
 
 main();

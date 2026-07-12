@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { Account } from './accounts';
+import { materialize, windowWorkingDir } from './workdir';
 import { log } from './log';
 
 /**
@@ -60,8 +61,14 @@ export class WindowBinding {
    * possibly deleted-from-disk) dir would silently stay in use until reload.
    */
   async forget(account: Account): Promise<void> {
-    if (this.context.workspaceState.get<string>(ACTIVE_KEY) === account.name) {
+    // A window is bound to an account by NAME (its dir is the window's own working
+    // copy, not the account's), so that — not a path comparison — is what says
+    // whether this window was the one running it.
+    const wasActive = this.context.workspaceState.get<string>(ACTIVE_KEY) === account.name;
+    if (wasActive) {
       await this.context.workspaceState.update(ACTIVE_KEY, undefined);
+      delete process.env[ENV_VAR];
+      this.applyTerminalEnv(undefined);
     }
     const map = this.getRepoMap();
     const filtered = Object.fromEntries(
@@ -70,10 +77,31 @@ export class WindowBinding {
     if (Object.keys(filtered).length !== Object.keys(map).length) {
       await this.context.globalState.update(REPO_MAP_KEY, filtered);
     }
-    const env = process.env[ENV_VAR];
-    if (env && path.normalize(env) === path.normalize(account.dir)) {
-      delete process.env[ENV_VAR];
+    this.onDidChange.fire();
+  }
+
+  /**
+   * Releases this window's binding entirely — for when the bound account no
+   * longer exists (it was forgotten, possibly while this window was closed).
+   *
+   * The stale name must be scrubbed from EVERY place getActiveName() can
+   * restore it from — workspaceState AND this repo's entry in the repo map —
+   * because both survive a window reload. v1.2.1 reloaded without doing this,
+   * and the "account is gone" branch re-fired on the same stale name after
+   * every reload: an infinite reload loop.
+   */
+  async release(): Promise<void> {
+    await this.context.workspaceState.update(ACTIVE_KEY, undefined);
+    const repo = this.getRepoKey();
+    if (repo) {
+      const map = { ...this.getRepoMap() };
+      if (map[repo] !== undefined) {
+        delete map[repo];
+        await this.context.globalState.update(REPO_MAP_KEY, map);
+      }
     }
+    delete process.env[ENV_VAR];
+    this.applyTerminalEnv(undefined);
     this.onDidChange.fire();
   }
 
@@ -94,6 +122,36 @@ export class WindowBinding {
   }
 
   /**
+   * Points this window's TERMINALS at the same account as its Claude Code.
+   *
+   * Terminals are not children of the extension host — VSCode spawns them from
+   * its own pty host — so our runtime `process.env` mutation never reaches them.
+   * Without this, `claude` run in an integrated terminal silently falls back to
+   * the DEFAULT account, no matter which account the window is pinned to: you
+   * think you're working as one account and the terminal bills another.
+   * `environmentVariableCollection` is the official channel for an extension to
+   * contribute env vars to the terminals of its OWN window, so each window's
+   * terminals follow that window's account.
+   *
+   * Not to be confused with the `terminal.integrated.env.*` SETTING, which
+   * clearMachineOverride() strips: that one is machine-wide and would force
+   * every window onto a single account.
+   *
+   * Terminals already open keep the old value until restarted — VSCode flags
+   * them with its own "terminal needs to be restarted" indicator.
+   *
+   * External terminals (a plain WSL shell, Windows Terminal, ssh) are NOT
+   * children of VSCode at all and cannot be reached by any extension API; they
+   * keep using the default account.
+   */
+  private applyTerminalEnv(dir: string | undefined): void {
+    const collection = this.context.environmentVariableCollection;
+    collection.description = 'Claude account for this window';
+    if (dir) collection.replace(ENV_VAR, dir);
+    else collection.delete(ENV_VAR);
+  }
+
+  /**
    * Binds this window to the given account: sets process.env so any `claude`
    * process spawned afterwards (e.g. a new conversation) uses this account's
    * data dir, and remembers the choice in workspaceState.
@@ -101,9 +159,23 @@ export class WindowBinding {
    * Does NOT affect an already-running Claude session — the caller decides
    * whether to start a new conversation or reload the window.
    */
+  /** This window's own CLAUDE_CONFIG_DIR — never shared with another window. */
+  workingDir(): string {
+    return windowWorkingDir(this.context);
+  }
+
   async bind(account: Account): Promise<void> {
-    log(`bind: ${account.name} → ${account.dir} (was ${process.env[ENV_VAR] ?? '(default)'})`);
-    process.env[ENV_VAR] = account.dir;
+    // The window runs a COPY of the account, in a dir only it uses. Pointing two
+    // windows at an account's own dir is what let a sign-in in one of them wipe
+    // the other's account — see workdir.ts.
+    // force: an explicit bind (switch, or saving a just-signed-in account) must
+    // stock the dir even when it's empty — unlike the restore at activation, where
+    // an empty dir means the user logged out and refilling it would undo that.
+    const dir = this.workingDir();
+    materialize(account, dir, true);
+    log(`bind: ${account.name} → ${dir} (was ${process.env[ENV_VAR] ?? '(default)'})`);
+    process.env[ENV_VAR] = dir;
+    this.applyTerminalEnv(dir);
     await this.context.workspaceState.update(ACTIVE_KEY, account.name);
     const repo = this.getRepoKey();
     if (repo) {
@@ -113,13 +185,30 @@ export class WindowBinding {
     this.onDidChange.fire();
   }
 
-  /** Applies the remembered account to process.env at activation time. */
+  /**
+   * Applies the remembered account to process.env at activation time —
+   * synchronously, because Claude Code reads CLAUDE_CONFIG_DIR the moment IT
+   * activates and we have to get there first.
+   *
+   * Stocking the working dir here doubles as the migration off the old model
+   * (where a window pointed straight at the account's dir): the first activation
+   * after the upgrade copies the account into the window's own dir, and from then
+   * on nothing else can write to it.
+   */
   applyStored(resolve: (name: string) => Account | undefined): Account | undefined {
     const name = this.getActiveName();
-    if (!name) return undefined;
-    const account = resolve(name);
-    if (!account) return undefined;
-    process.env[ENV_VAR] = account.dir;
+    const account = name ? resolve(name) : undefined;
+    if (!account) {
+      // The terminal collection is persisted by VSCode across restarts, so a
+      // forgotten account's dir can survive there and keep pointing terminals at
+      // a signed-out account. Drop it whenever this window has no account.
+      this.applyTerminalEnv(undefined);
+      return undefined;
+    }
+    const dir = this.workingDir();
+    materialize(account, dir);
+    process.env[ENV_VAR] = dir;
+    this.applyTerminalEnv(dir);
     return account;
   }
 

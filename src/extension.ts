@@ -1,23 +1,34 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { AccountRegistry } from './accounts';
 import { WindowBinding } from './binding';
 import { StatusBarManager } from './statusBar';
-import { SetupWizard } from './setupWizard';
+import { SetupWizard, NOTICE_KEY } from './setupWizard';
 import { ensureSharedHistory, unshareHistory, sharedStoreDir } from './sharedHistory';
 import { defaultSourceDir } from './capture';
 import { AccountWatcher } from './accountWatcher';
+import { allWorkingDirs, workingRoot } from './workdir';
 import { log, showLog } from './log';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const registry = new AccountRegistry(context);
   const binding = new WindowBinding(context);
-  const wizard = new SetupWizard(registry, binding);
+  const wizard = new SetupWizard(registry, binding, context);
   const statusBar = new StatusBarManager(registry, binding);
+
+  // A forgotten account no longer resolves, so a window that remembered one
+  // falls back to the default dir and — via auto-save — onto whichever saved
+  // account is signed in there. That's intended: the user then either picks
+  // another account from the list, or signs in to a new one in Claude Code and
+  // we capture it.
+  const resolveAccount = (name: string) => registry.get(name);
 
   // Bind this window to its remembered account FIRST and synchronously, so
   // process.env.CLAUDE_CONFIG_DIR is set before Claude Code spawns `claude`
   // (both extensions activate on startup — minimise the race window).
-  let bound = binding.applyStored((name) => registry.get(name));
+  let bound = binding.applyStored(resolveAccount);
 
   // ── The critical fix ───────────────────────────────────────────────────────
   // The machine-scoped `claudeCode.environmentVariables` setting is shared by
@@ -26,10 +37,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // isolation flows through process.env instead.
   const cleared = await binding.clearMachineOverride();
 
+  // A short-lived earlier design kept a "shadow vault" of credential copies. The
+  // per-window working dirs made it unnecessary — an account's store IS the spare
+  // copy now — but it held real tokens, so leave none behind.
+  try {
+    const vault = path.join(os.homedir(), '.claude-vault');
+    if (fs.existsSync(vault)) {
+      fs.rmSync(vault, { recursive: true, force: true });
+      log('removed the obsolete credential vault');
+    }
+  } catch (err) {
+    log(`could not remove the obsolete vault: ${(err as Error).message}`);
+  }
+
   // Pick up any accounts already logged in on disk, then retry binding in case
   // the remembered account was only discovered just now.
   await registry.discoverAndMerge();
-  if (!bound) bound = binding.applyStored((name) => registry.get(name));
+  if (!bound) bound = binding.applyStored(resolveAccount);
 
   // Shared history: symlink every account's projects/sessions/… to one store so
   // a conversation survives an account switch. Do this BEFORE Claude Code reads
@@ -39,10 +63,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Forgotten accounts' dirs are included: they stay on disk, so they must
   // follow the shared-history mode too (especially the un-share pass —
   // otherwise they'd keep dangling symlinks into the store).
+  // Working dirs MUST be in here: a window's conversations live in the dir it
+  // actually runs on, so without the links its history would be stranded there
+  // and appear to vanish the moment it switched account.
   const allDirs = (): string[] => [
     defaultSourceDir(),
     ...registry.list().map((a) => a.dir),
     ...registry.listForgotten().map((a) => a.dir),
+    ...allWorkingDirs(),
   ];
   const applySharedHistory = (announce: boolean): void => {
     const on = vscode.workspace
@@ -105,18 +133,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     cmd('claudeProfiles.captureAccount', () => wizard.captureCurrentAccount()),
     cmd('claudeProfiles.removeProfile', () => wizard.removeAccountInteractive()),
     cmd('claudeProfiles.showStatus', () => statusBar.onClick()),
+    cmd('claudeProfiles.showLog', () => showLog()),
     // React to the user flipping claudeProfiles.sharedHistory at runtime.
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('claudeProfiles.sharedHistory')) applySharedHistory(true);
+    }),
+    // Only the focused window repairs a dir whose account was replaced by a
+    // sign-in (it's the window the user signed in from). So a window that was
+    // unfocused while that happened must reconcile when focus comes back —
+    // otherwise a handoff nobody was around to finish would sit unrepaired.
+    vscode.window.onDidChangeWindowState((s) => {
+      if (s.focused) void wizard.reconcile().finally(() => statusBar.reconfirm());
     }),
     statusBar
   );
 
   statusBar.initialize();
 
-  // Repaint the status bar the moment this window's account identity changes on
-  // disk (e.g. a /login inside this window), so it never lags behind.
-  const watcher = new AccountWatcher(binding, () => statusBar.reconfirm());
+  // When this window's account state changes on disk (a /login or /logout inside
+  // this window, or a forget from another one), reconcile: mirror the token into
+  // its shadow copy, save a newly-seen account, and — if a sign-in landed on top
+  // of the account this dir held — move the new account into a dir of its own and
+  // restore the displaced one. Then repaint the bar so it never lags behind.
+  const watcher = new AccountWatcher(binding, () => {
+    void wizard.reconcile().finally(() => statusBar.reconfirm());
+  });
   watcher.start();
   context.subscriptions.push(watcher);
 
@@ -142,21 +183,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
   }
 
-  // First-run: no account bound to this window yet.
-  if (!bound) {
+  // Bring this window in step with what's on disk: save the account it's signed
+  // in as (no "Save" click), and follow a sign-in that changed which account its
+  // dir holds. Runs after the synchronous env binding above, so it never delays
+  // the critical activation race with Claude Code.
+  await wizard.reconcile({ atActivation: true });
+  // reconcile() may have just bound this window to a freshly-saved account.
+  if (!bound) bound = binding.applyStored(resolveAccount);
+
+  // An account handoff finishes with a reload, which kills any toast raised
+  // before it — so the news of what happened is delivered here instead.
+  const notice = context.globalState.get<string>(NOTICE_KEY);
+  if (notice) {
+    await context.globalState.update(NOTICE_KEY, undefined);
+    // A notice typically reports an account handoff. If this window came out of
+    // it with NO account while saved ones exist (forget reloaded it into limbo),
+    // the news must come with the way out attached, not read as a dead end.
+    const canSwitch = !binding.getActiveName() && registry.listUniqueByEmail().length > 0;
+    void vscode.window
+      .showInformationMessage(`Claude Accounts: ${notice}`, ...(canSwitch ? ['Switch account'] : []))
+      .then((pick) => {
+        if (pick === 'Switch account') {
+          void vscode.commands.executeCommand('claudeProfiles.switchAccount');
+        }
+      });
+  }
+
+  // First-run guidance only when there's genuinely nothing to work with: no
+  // saved accounts and this window isn't signed in anywhere (so auto-save had
+  // nothing to capture). Otherwise the status bar already shows the account.
+  if (!bound && registry.list().length === 0) {
     const key = 'claudeProfiles.introShown';
     if (!context.globalState.get<boolean>(key, false)) {
       await context.globalState.update(key, true);
-      const accounts = registry.list();
-      const msg = accounts.length
-        ? 'Claude Accounts: pick which account this window should use.'
-        : 'Claude Accounts: no saved accounts yet. Sign in with Claude Code, then save the current account.';
-      const pick = await vscode.window.showInformationMessage(
-        msg,
-        accounts.length ? 'Choose account' : 'Save current account'
+      vscode.window.showInformationMessage(
+        'Claude Accounts: no accounts detected yet. Sign in with Claude Code (Account menu → Login, ' +
+          'or /login in a chat) and this window will remember the account automatically.'
       );
-      if (pick === 'Choose account') await wizard.switchAccountInteractive();
-      else if (pick === 'Save current account') await wizard.captureCurrentAccount();
     }
   }
 }

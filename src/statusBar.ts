@@ -1,9 +1,12 @@
 import * as vscode from 'vscode';
-import { AccountRegistry, readIdentity } from './accounts';
+import { AccountRegistry, readIdentity, hasCredentials } from './accounts';
 import { log } from './log';
 import { WindowBinding } from './binding';
 import { getAuthStatus, AuthStatus } from './cli';
 import { defaultSourceDir } from './capture';
+
+/** Marketplace id — the hover links to the extension's own page with it. */
+const EXTENSION_ID = 'DercasDrol.claude-parallel-accounts';
 
 /**
  * Status bar item showing the account bound to THIS window. The displayed
@@ -99,17 +102,62 @@ export class StatusBarManager implements vscode.Disposable {
     });
   }
 
+  /**
+   * What this window's account REALLY is.
+   *
+   * The identity file outlives the token: after a `/logout` — or a forget in
+   * another window — `.credentials.json` is gone but `.claude.json` still names
+   * the account. So the identity file alone must NEVER be enough to claim
+   * "signed in", or the bar happily shows a signed-out account as if nothing
+   * happened. Ground truth is the token file plus the CLI's verdict; the
+   * identity is only a fast fallback for the email while the CLI is still
+   * answering. (A confirmed `loggedIn` without a token file is still trusted —
+   * that's an API-key setup, which keeps no `.credentials.json`.)
+   */
+  private resolve(dir: string): { email?: string; signedOut: boolean; confirmed: boolean } {
+    const status = this.cachedStatus(dir);
+    const cliSaysIn = status?.loggedIn === true;
+    const cliSaysOut = status !== undefined && status?.loggedIn !== true;
+    const signedOut = cliSaysOut || (!hasCredentials(dir) && !cliSaysIn);
+    return {
+      email: signedOut ? undefined : status?.email ?? readIdentity(dir)?.email,
+      signedOut,
+      confirmed: cliSaysIn,
+    };
+  }
+
+  /**
+   * The hover card. VSCode can't anchor a real menu to a status bar item, but a
+   * trusted-markdown hover CAN hold command links — so this doubles as the item's
+   * menu, and it's the only surface the user ever sees. It therefore has to say
+   * WHOSE item this is: an unlabelled email in the status bar is a mystery, and
+   * there is no other affordance to find the extension, its settings, or its log.
+   */
+  private card(sections: string[]): vscode.MarkdownString {
+    const arg = (v: unknown) => encodeURIComponent(JSON.stringify(v));
+    const links = [
+      `[$(gear) Settings](command:workbench.action.openSettings?${arg('claudeProfiles')} "Configure Claude Parallel Accounts")`,
+      `[$(extensions) Extension](command:extension.open?${arg([EXTENSION_ID])} "Open the extension page")`,
+      `[$(output) Log](command:claudeProfiles.showLog "Show what this extension has been doing")`,
+    ].join(' &nbsp;·&nbsp; ');
+
+    const body = sections.filter(Boolean).join('\n\n');
+    const md = new vscode.MarkdownString(
+      `$(account) **Claude Parallel Accounts**\n\n${body}\n\n---\n\n${links}`
+    );
+    md.isTrusted = true;
+    md.supportThemeIcons = true;
+    return md;
+  }
+
   private render(): void {
     const dir = this.effectiveDir();
     const active = this.binding.getActiveName();
     const savedName = this.registry.getByDir(dir)?.name;
 
     const status = this.cachedStatus(dir);
-    // Prefer the CLI-confirmed email; fall back to the config file for instant
-    // paint before the async confirmation lands.
-    const email = status?.email ?? readIdentity(dir)?.email;
-    const confirmed = status?.loggedIn === true;
-    const notLoggedIn = status !== undefined && status?.loggedIn !== true && !email;
+    const { email, signedOut, confirmed } = this.resolve(dir);
+    const notLoggedIn = signedOut;
 
     if (email) {
       // The email IS the identity — no internal label in front of it. The only
@@ -136,43 +184,44 @@ export class StatusBarManager implements vscode.Disposable {
         !isSaved ? '[$(save) Save this account](command:claudeProfiles.captureAccount "Save it so you can switch back to it later")' : '',
         hasOthers ? '[$(arrow-swap) Switch account](command:claudeProfiles.switchAccount "Pick another account for this window")' : '',
         unique.length > 0
-          ? '[$(trash) Forget…](command:claudeProfiles.removeProfile "Hide a saved account from the list — nothing is deleted")'
+          ? '[$(trash) Forget…](command:claudeProfiles.removeProfile "Sign the account out and remove it from the list")'
           : '',
       ].filter(Boolean);
-      const md = new vscode.MarkdownString(
-        [
-          `**${email}**${status?.subscriptionType ? ` · ${status.subscriptionType}` : ''}${status?.orgName ? ` · ${status.orgName}` : ''}`,
-          `Data dir: \`${dir}\``,
-          !isSaved ? '_$(circle-outline) This account is not saved yet — save it to switch back to it later._' : '',
-          this.binding.rememberedForFolder()
-            ? '_Auto-selected: this folder used this account last time._'
-            : '',
-          confirmed ? '' : '_Confirming with `claude auth status`…_',
-          '',
-          actions.join(' &nbsp;·&nbsp; '),
-        ]
-          .filter(Boolean)
-          .join('\n\n')
-      );
-      md.isTrusted = true;
-      md.supportThemeIcons = true;
-      this.item.tooltip = md;
+      this.item.tooltip = this.card([
+        `**${email}**${status?.subscriptionType ? ` · ${status.subscriptionType}` : ''}${status?.orgName ? ` · ${status.orgName}` : ''}`,
+        `This window runs this account. Other windows can run others at the same time.`,
+        `Accounts saved: **${unique.length}**${
+          this.binding.rememberedForFolder() ? ' · _auto-selected: this folder used it last time_' : ''
+        }`,
+        !isSaved ? '_$(circle-outline) Not saved yet — saving lets you switch back to it later._' : '',
+        confirmed ? '' : '_Confirming with `claude auth status`…_',
+        actions.join(' &nbsp;·&nbsp; '),
+      ]);
       this.item.backgroundColor = undefined;
     } else if (notLoggedIn) {
-      // Reached both when genuinely logged out AND when the CLI call failed
-      // (e.g. `claude` not on PATH) — we cannot tell these apart, so the
-      // tooltip must not confidently claim "not signed in".
+      // Signed out: no token in this dir, or the CLI says so. The account this
+      // dir used to hold may still be NAMED in its .claude.json (identity
+      // outlives the token) — say so instead of pretending it's still active.
+      const wasEmail = readIdentity(dir)?.email;
       this.item.text = '$(account) Claude: sign in';
-      this.item.tooltip = new vscode.MarkdownString(
-        `No signed-in Claude account detected for \`${dir}\`.\n\n` +
-          `Sign in with Claude Code (Account menu → Login, or /login in a chat), then save the account here. ` +
-          `If you ARE signed in, check that the \`claude\` CLI is available on PATH.`
-      );
+      this.item.tooltip = this.card([
+        `**Not signed in**`,
+        wasEmail
+          ? `This window last ran **${wasEmail}**, but that account is signed out here — a \`/logout\`, ` +
+            `or it was forgotten. Claude Code may keep showing it until the window reloads.`
+          : `No Claude account is signed in for this window.`,
+        `Sign in with Claude Code (Account menu → Login, or \`/login\` in a chat) and the account is ` +
+          `saved here automatically — no extra step.`,
+        `_If you ARE signed in, check that the \`claude\` CLI is on your PATH._`,
+        this.registry.listUniqueByEmail().length > 0
+          ? '[$(arrow-swap) Switch account](command:claudeProfiles.switchAccount "Use one of your saved accounts in this window")'
+          : '',
+      ]);
       this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else {
       // Still confirming for the first time.
       this.item.text = '$(account) Claude $(sync~spin)';
-      this.item.tooltip = new vscode.MarkdownString('Reading current Claude account…');
+      this.item.tooltip = this.card(['Reading the Claude account this window is signed in as…']);
       this.item.backgroundColor = undefined;
     }
   }
@@ -184,8 +233,7 @@ export class StatusBarManager implements vscode.Disposable {
    */
   async onClick(): Promise<void> {
     const dir = this.effectiveDir();
-    const status = this.cachedStatus(dir);
-    const email = status?.email ?? readIdentity(dir)?.email;
+    const { email } = this.resolve(dir);
     // Saved is by EMAIL, not by this exact dir: a window on the default dir can
     // still be an account that was saved (as a named copy) elsewhere.
     const savedByEmail = email ? this.registry.savedForEmail(email) : undefined;
@@ -205,6 +253,13 @@ export class StatusBarManager implements vscode.Disposable {
       return;
     }
     if (!email) {
+      // Signed out is exactly when the user most needs the saved accounts —
+      // e.g. this window's account was forgotten but others exist. A bare
+      // "go sign in" here would hide a one-click way out.
+      if (this.registry.listUniqueByEmail().length > 0) {
+        await vscode.commands.executeCommand('claudeProfiles.switchAccount');
+        return;
+      }
       vscode.window.showWarningMessage(
         'No signed-in Claude account. Open the Claude Code panel and run /login, then click here to save it.'
       );

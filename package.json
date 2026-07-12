@@ -2,12 +2,15 @@
   "name": "claude-parallel-accounts",
   "displayName": "Claude Parallel Accounts",
   "description": "Companion for the Claude Code VS Code extension: run a different Claude account in each VSCode window simultaneously — capture, switch, and isolate accounts per window.",
-  "version": "1.1.5",
+  "version": "1.2.3",
   "publisher": "DercasDrol",
   "icon": "images/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/DercasDrol/claude-parallel-profiles"
+  },
+  "bugs": {
+    "url": "https://github.com/DercasDrol/claude-parallel-profiles/issues"
   },
   "license": "MIT",
   "author": {
@@ -35,6 +38,19 @@
   "extensionKind": [
     "workspace"
   ],
+  "capabilities": {
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Claude accounts live in data directories on the local file system, which virtual workspaces don't have."
+    },
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Works in Restricted Mode. The extension never reads or executes workspace content — it only uses the workspace folder path to tell windows apart. Until you trust the folder, its workspace settings cannot override this extension's configuration.",
+      "restrictedConfigurations": [
+        "claudeProfiles.sharedHistory"
+      ]
+    }
+  },
   "contributes": {
     "commands": [
       {
@@ -56,15 +72,20 @@
         "command": "claudeProfiles.removeProfile",
         "title": "Forget a Saved Account",
         "category": "Claude Accounts"
+      },
+      {
+        "command": "claudeProfiles.showLog",
+        "title": "Show Log",
+        "category": "Claude Accounts"
       }
     ],
     "configuration": {
-      "title": "Claude Accounts",
+      "title": "Claude Parallel Accounts",
       "properties": {
         "claudeProfiles.sharedHistory": {
           "type": "boolean",
           "default": true,
-          "description": "Share conversation history across all accounts (~/.claude-shared): projects, sessions and related state are symlinked from every account's data dir, so a chat continues after switching accounts. Credentials and identity stay per-account. Disable to keep each account's history fully isolated."
+          "markdownDescription": "Keep **one conversation history shared by all your accounts**.\n\nClaude Code normally stores chats inside the account's own data directory, so switching account would make them vanish. With this on, history lives in one store (`~/.claude-shared`) that every account links to — hit a usage limit, switch account, and carry on in the same conversation.\n\nCredentials and identity are never shared; they stay strictly per-account. Turning this off gives each account its own full copy of the history from that moment on."
         }
       }
     }

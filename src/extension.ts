@@ -12,7 +12,64 @@ import { AccountWatcher } from './accountWatcher';
 import { allWorkingDirs, workingRoot } from './workdir';
 import { log, showLog } from './log';
 
+/**
+ * Everything this extension does rests on Linux semantics that we verified:
+ * Claude Code keeping credentials as FILES (macOS uses the Keychain instead),
+ * /proc for finding live sessions, symlinks for shared history, a POSIX shell
+ * for the CLI. On any other OS those assumptions silently break — up to
+ * destructive misbehaviour (e.g. the registry pruning every account because it
+ * sees no credential files). So elsewhere the extension must not guess: it
+ * activates into an INERT mode that touches nothing and says why.
+ *
+ * The Marketplace additionally publishes Linux-only packages, so this mode is
+ * normally reached only by a side-loaded VSIX. The check runs where the
+ * extension actually executes — in a WSL/SSH/container window that's the
+ * REMOTE side (extensionKind "workspace"), so a Windows desktop driving a
+ * Linux remote is fully supported and never lands here.
+ */
+function activateUnsupported(context: vscode.ExtensionContext): void {
+  const label =
+    process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'native Windows' : process.platform;
+  const msg =
+    `Claude Parallel Accounts supports Linux only for now — desktop Linux, WSL, Remote-SSH to a Linux ` +
+    `host, or a dev container. On ${label} it stays inactive: no files are read or written, no accounts ` +
+    `are touched.` +
+    (process.platform === 'win32' ? ' Tip: open your folder in a WSL window and install it there.' : '');
+  log(`platform ${process.platform} is unsupported — inert mode, nothing will be touched`);
+
+  const item = vscode.window.createStatusBarItem(
+    'claudeProfiles.status',
+    vscode.StatusBarAlignment.Right,
+    90
+  );
+  item.name = 'Claude Account';
+  item.text = '$(account) Claude: unsupported OS';
+  const tooltip = new vscode.MarkdownString(`$(account) **Claude Parallel Accounts**\n\n${msg}`);
+  tooltip.supportThemeIcons = true;
+  item.tooltip = tooltip;
+  item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+  item.command = 'claudeProfiles.showStatus';
+  item.show();
+
+  // The commands stay registered so palette entries and keybindings don't die
+  // with a cryptic "command not found" — they all explain the same thing.
+  const explain = () => void vscode.window.showInformationMessage(msg);
+  context.subscriptions.push(
+    item,
+    vscode.commands.registerCommand('claudeProfiles.switchAccount', explain),
+    vscode.commands.registerCommand('claudeProfiles.captureAccount', explain),
+    vscode.commands.registerCommand('claudeProfiles.removeProfile', explain),
+    vscode.commands.registerCommand('claudeProfiles.showStatus', explain),
+    vscode.commands.registerCommand('claudeProfiles.showLog', () => showLog())
+  );
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  if (process.platform !== 'linux') {
+    activateUnsupported(context);
+    return;
+  }
+
   const registry = new AccountRegistry(context);
   const binding = new WindowBinding(context);
   const wizard = new SetupWizard(registry, binding, context);

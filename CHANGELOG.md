@@ -1,10 +1,20 @@
 # Changelog
 
+## 1.2.4 — 2026-07-12
+
+### Changed
+
+- **Linux-only platform gate.** The extension is built for the file-based credential layout Claude Code uses on Linux; elsewhere those assumptions break (macOS keeps credentials in the Keychain, native Windows is untested). Two layers now enforce this honestly:
+  - the Marketplace release ships **Linux packages only** (x64/arm64/armhf + Alpine), so macOS / native Windows aren't offered the extension at all — WSL, Remote-SSH and dev containers install into the remote Linux side and keep working;
+  - if a VSIX is side-loaded anywhere else, the extension activates into an **inert mode**: no files read or written, no accounts or settings touched (the uninstall hook is guarded the same way); the status bar and all commands explain the situation instead of failing cryptically.
+- README: prominent platform-support note; deduplicated the header links (one Marketplace link instead of six) and replaced the retired shields.io marketplace badges with live CI/platform/license ones.
+
 ## 1.2.3 — 2026-07-12
 
 The per-window architecture release: account isolation is now structural, not heuristic.
 
 ### Added
+
 - **Per-window working directories.** Each window runs a private copy (`~/.claude-windows/<id>`) of its account's store, so a `/login` can only ever affect the window it happened in — no shared state, no focus guessing, no races.
 - **Auto-save.** A signed-in account is saved the moment it's noticed; the separate "save" step is no longer required (the command remains for manual use).
 - **Forceful forget.** Forgetting an account now deletes its OAuth token from every copy on the machine, interrupts live `claude` sessions running on it, and reloads any window that used it — with a confirmation up front and a "Switch account" offer after.
@@ -16,6 +26,7 @@ The per-window architecture release: account isolation is now structural, not he
 - Signed-out windows offer one-click switching to a saved account (status bar click, notices, hover).
 
 ### Fixed
+
 - Infinite reload loop after forgetting the account a window was running.
 - Switching appearing to do nothing after an in-window `/login` (the window now fully reloads onto the new account; the old one stays in the list).
 - Newly added accounts not appearing in other windows until restart (the registry now converges on the on-disk stores).

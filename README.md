@@ -1,19 +1,18 @@
 # Claude Parallel Accounts
 
-[![VS Code](https://img.shields.io/badge/VS%20Code-Extension-blue.svg)](https://marketplace.visualstudio.com/items?itemName=DercasDrol.claude-parallel-accounts)
-[![Version](https://img.shields.io/visual-studio-marketplace/v/DercasDrol.claude-parallel-accounts?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=DercasDrol.claude-parallel-accounts)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/DercasDrol.claude-parallel-accounts)](https://marketplace.visualstudio.com/items?itemName=DercasDrol.claude-parallel-accounts)
+[![CI](https://img.shields.io/github/actions/workflow/status/DercasDrol/claude-parallel-profiles/ci.yml?label=CI)](https://github.com/DercasDrol/claude-parallel-profiles/actions)
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux%20%7C%20WSL%20%7C%20SSH-orange.svg)](#requirements)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **A companion for the [Claude Code extension for VS Code](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code): run a different Claude account in each VSCode window, at the same time — with one shared conversation history.**
 
-**[⬇️ Install](https://marketplace.visualstudio.com/items?itemName=DercasDrol.claude-parallel-accounts)** · **[🐙 Source](https://github.com/DercasDrol/claude-parallel-profiles)** · **[🐛 Report an issue](https://github.com/DercasDrol/claude-parallel-profiles/issues)**
+**[⬇️ Install from the Marketplace](https://marketplace.visualstudio.com/items?itemName=DercasDrol.claude-parallel-accounts)** · **[🐙 Source](https://github.com/DercasDrol/claude-parallel-profiles)** · **[🐛 Report an issue](https://github.com/DercasDrol/claude-parallel-profiles/issues)**
 
 Claude Code signs you into **one** account, shared by every VSCode window. If you juggle several — personal, work, a second Pro for when the first hits its limits — this extension gives **each window its own account**: pick it once per window, and your conversations follow you across accounts instead of disappearing.
 
 ℹ️ It's a **companion**, not a replacement: the official Claude Code extension must be installed; this one only controls which account each window uses.
 
-> ⭐ **Enjoying it?** [Rate it on the Marketplace](https://marketplace.visualstudio.com/items?itemName=DercasDrol.claude-parallel-accounts&ssr=false#review-details) — it helps other developers discover it.
+> 🐧 **Linux only (for now).** Built and tested on Linux: desktop VSCode on Linux, **WSL**, **Remote-SSH** to a Linux host, and dev containers. The check happens where the extension actually runs — in a WSL/SSH window that's the *remote* side — so a Windows desktop driving a Linux remote is fully supported. On macOS and native Windows the Marketplace doesn't offer the extension at all, and a side-loaded VSIX stays completely **inert**: no files read or written, no accounts touched — the status bar says why. (Reason: Claude Code stores credentials differently there, e.g. the macOS Keychain, and guessing would be worse than declining.)
 
 ---
 
@@ -25,17 +24,18 @@ Claude Code signs you into **one** account, shared by every VSCode window. If yo
 - **History is one whole.** Normally chats live inside the account's data directory and vanish when you switch. Here they live in one shared store: hit a usage limit, switch account, *continue the same conversation*.
 - **Forget really signs out.** Forgetting an account deletes its OAuth token from every copy on this machine and stops sessions running on it. The data directories stay — signing in again restores everything.
 
+> ⭐ **Enjoying it?** [Rate it on the Marketplace](https://marketplace.visualstudio.com/items?itemName=DercasDrol.claude-parallel-accounts&ssr=false#review-details) — it helps other developers discover it.
+
 ---
 
 ## Requirements
 
 | Requirement | Notes |
-|---|---|
-| VSCode ≥ 1.85 | desktop or WSL remote |
+| --- | --- |
+| Linux environment | desktop Linux, WSL, Remote-SSH (Linux host), or a dev container |
+| VSCode ≥ 1.85 | the extension installs into the (remote) Linux side |
 | [Claude Code extension](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code) | the thing being multiplied |
 | `claude` CLI on `$PATH` | asked read-only whether a directory is signed in |
-
-Best experience on Linux / WSL. On native Windows, shared history needs Developer Mode (symlinks); per-window isolation works everywhere.
 
 ---
 
@@ -121,13 +121,14 @@ This extension is built to manage credentials, so it holds itself to a strict po
 - **Conversations are moved, not read.** Shared history relinks the files; the extension does not inspect their contents.
 - **Minimal footprint elsewhere:** the workspace folder path is hashed to tell windows apart; `claude auth status` is asked (locally, read-only) to confirm a directory is signed in; on Linux/WSL the process list is scanned only during *Forget*, to stop `claude` processes running on the token being deleted.
 - **Self-restricted in the VSCode manifest:** disabled in virtual workspaces, and in Restricted Mode (untrusted folders) it never reads workspace content and workspace settings cannot override its configuration ([`capabilities`](package.json)).
+- **Inert off Linux.** On unsupported platforms it performs no operations at all — no file reads, no writes, no account changes; the uninstall hook is guarded the same way.
 - **Uninstalling cleans up:** its working copies lose their credentials, and all history symlinks revert to real directories — Claude Code behaves as if the extension never existed.
 
 ---
 
 ## Limitations
 
-- **Shared history on native Windows** requires Developer Mode (symlinks). Per-window isolation works everywhere.
+- **Linux only for now.** On macOS Claude Code keeps credentials in the Keychain (not files) and native Windows is untested — on both, the extension refuses to run rather than guess (see the note at the top). Support may come later.
 - **API-key users**: this is for OAuth (claude.ai) logins. With `ANTHROPIC_API_KEY` you don't need it — set the key per window yourself.
 - **Switching reloads the window** — a consequence of Claude Code reading its account once at start-up; surfaced honestly rather than pretended around.
 - The account email is read from the account's config file because recent Claude Code versions don't expose it via `claude auth status`.

@@ -55,6 +55,12 @@ function dropWorkingCredentials(home) {
 }
 
 function main() {
+  // On unsupported platforms the extension never created anything (it activates
+  // into an inert mode there), so there is nothing to revert — and guessing at
+  // other OSes' file layouts on uninstall is exactly the kind of manipulation
+  // the inert mode promises not to do.
+  if (os.platform() !== 'linux') return;
+
   const home = os.homedir();
   // A short-lived earlier version kept credential copies here. Never leave tokens.
   try {

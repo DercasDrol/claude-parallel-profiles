@@ -5,7 +5,7 @@ import * as os from 'os';
 import { Account, AccountRegistry, readIdentity, hasCredentials } from './accounts';
 import { WindowBinding } from './binding';
 import { getAuthStatus, AuthStatus } from './cli';
-import { snapshotAccount, defaultSourceDir } from './capture';
+import { snapshotAccount, defaultSourceDir, mirrorToDefault } from './capture';
 import { ensureSharedHistory } from './sharedHistory';
 import { signOut, interruptSessions, dirsHoldingToken } from './reclaim';
 import { refreshStore, allWorkingDirs, materialize } from './workdir';
@@ -288,6 +288,11 @@ export class SetupWizard {
 
     // Keep the store's token from drifting far behind the one actually in use.
     refreshStore(account, dir);
+    // And keep Claude Code's own default dir signed in as this account, so that
+    // losing the extension — uninstalled, disabled, failed to activate — never
+    // leaves the user with a signed-out Claude Code. The uninstall hook cannot
+    // cover that: VSCode defers it to the next server start, and it may never run.
+    mirrorToDefault(dir, readIdentity(dir));
     const changed = active !== account.name;
     if (changed) await this.binding.bind(account);
 
@@ -348,10 +353,16 @@ export class SetupWizard {
 
     await this.registry.forget(account);
     await this.binding.forget(account);
-    signOut(account.dir);
-    for (const d of allWorkingDirs()) {
-      if (readIdentity(d)?.email === email) signOut(d);
-    }
+    // Every dir holding this (now revoked) token, not just the account's store:
+    // the working copies AND Claude Code's default dir, which mirrorToDefault
+    // keeps stocked. Missing the default one would leave the machine looking
+    // signed in to an account whose token the server has already killed — it
+    // would fail on the first request, with nothing on screen to explain why.
+    const dirs = [
+      ...dirsHoldingToken(email),
+      ...allWorkingDirs().filter((d) => readIdentity(d)?.email === email),
+    ];
+    for (const d of dirs) signOut(d);
     vscode.window.showInformationMessage(
       `Claude Accounts: you signed out of ${email}, so it was removed from the list — a logout ` +
         `revokes the account everywhere, not just in this window. Sign in again to bring it back.`

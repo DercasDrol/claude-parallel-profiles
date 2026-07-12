@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import * as path from 'path';
 import { Account } from './accounts';
 import { materialize, windowWorkingDir } from './workdir';
@@ -26,6 +27,8 @@ import { log } from './log';
 const ACTIVE_KEY = 'claudeProfiles.activeAccount';
 /** Global map: repo/workspace folder path → last account name used there. */
 const REPO_MAP_KEY = 'claudeProfiles.repoAccounts';
+/** Global: the account most recently bound anywhere — the default for a new window. */
+const LAST_KEY = 'claudeProfiles.lastAccount';
 const ENV_VAR = 'CLAUDE_CONFIG_DIR';
 
 export class WindowBinding {
@@ -56,6 +59,22 @@ export class WindowBinding {
   }
 
   /**
+   * The account a window falls back to when it has never chosen one: whichever was
+   * bound last, anywhere.
+   *
+   * Not a convenience — a correctness requirement. A window that activates with NO
+   * account leaves CLAUDE_CONFIG_DIR unset, so Claude Code reads the default dir
+   * and caches it; the moment we then adopt an account, the window has to RELOAD to
+   * make Claude Code look again. Without this fallback that reload would fire on
+   * every newly opened project. Binding before Claude Code ever reads the variable
+   * is what makes the reload unnecessary — the same race the whole extension is
+   * built around.
+   */
+  private getLastName(): string | undefined {
+    return this.context.globalState.get<string>(LAST_KEY);
+  }
+
+  /**
    * Forgets an account everywhere this binding could restore it from —
    * workspaceState, the repo→account map (all repos), and process.env if this
    * window currently points at it. Without the env release, a forgotten (and
@@ -77,6 +96,11 @@ export class WindowBinding {
     );
     if (Object.keys(filtered).length !== Object.keys(map).length) {
       await this.context.globalState.update(REPO_MAP_KEY, filtered);
+    }
+    // And out of the "last used anywhere" default, or the next new window would
+    // adopt the very account the user just signed out of.
+    if (this.getLastName() === account.name) {
+      await this.context.globalState.update(LAST_KEY, undefined);
     }
     this.onDidChange.fire();
   }
@@ -186,6 +210,7 @@ export class WindowBinding {
     process.env[ENV_VAR] = dir;
     this.applyTerminalEnv(dir);
     await this.context.workspaceState.update(ACTIVE_KEY, account.name);
+    await this.context.globalState.update(LAST_KEY, account.name);
     const repo = this.getRepoKey();
     if (repo) {
       const map = { ...this.getRepoMap(), [repo]: account.name };
@@ -205,7 +230,18 @@ export class WindowBinding {
    * on nothing else can write to it.
    */
   applyStored(resolve: (name: string) => Account | undefined): Account | undefined {
-    const name = this.getActiveName();
+    // This window's own choice, if it ever made one.
+    let name = this.getActiveName();
+    // Otherwise fall back to the last account used anywhere — but ONLY for a window
+    // that has never run at all (no working dir yet). An EXISTING working dir means
+    // this window has a past, and the two ways it can have lost its account —
+    // `/logout` here, or the account being forgotten elsewhere — both leave the dir
+    // behind, emptied. Adopting an account into it would resurrect a session the
+    // user deliberately ended, on a token the server has already revoked.
+    if (!name && !fs.existsSync(this.workingDir())) name = this.getLastName();
+    // A name that no longer resolves (forgotten account) falls through to "no
+    // account" — never resurrected. That is what turned a stale name into a reload
+    // loop in v1.2.1.
     const account = name ? resolve(name) : undefined;
     if (!account) {
       // The terminal collection is persisted by VSCode across restarts, so a

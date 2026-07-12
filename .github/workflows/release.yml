@@ -9,12 +9,12 @@ on:
             publish:
                 description: "Publish to VS Code Marketplace"
                 required: true
-                default: "true"
+                default: true
                 type: boolean
             create_release:
                 description: "Create GitHub Release"
                 required: true
-                default: "true"
+                default: true
                 type: boolean
 
 jobs:
@@ -49,16 +49,23 @@ jobs:
                   echo "version=$VERSION" >> $GITHUB_OUTPUT
                   echo "tag=v$VERSION" >> $GITHUB_OUTPUT
 
-            # Linux-only platform targets: the Marketplace then simply doesn't
-            # offer the extension on macOS / native Windows, where Claude Code
-            # stores credentials differently and this extension stays inert.
-            # WSL / Remote-SSH / dev containers install the extension into the
-            # REMOTE (Linux) host, so they are covered by these targets.
-            - name: Package extension (Linux targets)
-              run: |
-                  for t in linux-x64 linux-arm64 linux-armhf alpine-x64 alpine-arm64; do
-                    npx @vscode/vsce package --target "$t"
-                  done
+            # ONE universal package — deliberately not platform-specific.
+            #
+            # Publishing Linux-only targets looked like a neat way to hide the
+            # extension where it cannot work. It isn't: in WSL and Remote-SSH the
+            # extension runs on the Linux REMOTE, but the VSCode CLIENT is Windows
+            # or macOS ("clientTargetPlatform":"win32-x64" in its own install log)
+            # — and the client is what resolves the Marketplace. With no win32
+            # package and no universal one, it finds no compatible version, decides
+            # the extension is gone ("This extension is no longer available on the
+            # Extension Marketplace") and never offers an update. That hit exactly
+            # the users this extension is FOR.
+            #
+            # There is no native code here, so a platform-specific build buys
+            # nothing anyway. The Linux requirement is enforced where it belongs —
+            # at runtime, by the inert mode in extension.ts.
+            - name: Package extension (universal)
+              run: npx @vscode/vsce package
 
             - name: Create GitHub Release (on tag push)
               uses: softprops/action-gh-release@v2
@@ -85,8 +92,7 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-            # The .vsix files embed their platform target, so publishing them
-            # by path keeps the Linux-only restriction on both registries.
+            # One universal .vsix, published by path to both registries.
             - name: Publish to VS Code Marketplace
               if: |
                   (startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish == 'true') &&

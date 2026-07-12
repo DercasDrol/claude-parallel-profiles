@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { AuthStatus } from './cli';
+import { AccountIdentity } from './accounts';
 
 /**
  * Snapshots the account currently signed in inside `sourceDir` into a dedicated
@@ -102,4 +103,76 @@ function isDefaultDir(dir: string): boolean {
 /** Default source dir when a window isn't bound to a named account yet. */
 export function defaultSourceDir(): string {
   return path.join(os.homedir(), '.claude');
+}
+
+/**
+ * Keeps Claude Code's OWN default account (`~/.claude`) signed in as the account
+ * this machine last used.
+ *
+ * Why this exists: without it, the host is broken the moment we stop pointing at
+ * it. `CLAUDE_CONFIG_DIR` disappears with the extension, Claude Code falls back to
+ * `~/.claude` — and finds no token there, because every token lives in a directory
+ * only this extension knows about. The user uninstalls a companion extension and
+ * their Claude Code is signed out.
+ *
+ * The uninstall hook cannot fix that: VSCode defers it to the next SERVER start,
+ * so between uninstalling and fully restarting VSCode there is a window — possibly
+ * a long one — where Claude Code simply doesn't work. And the hook may never run at
+ * all. A promise this important cannot rest on it.
+ *
+ * So the invariant is maintained continuously instead: at every reconcile, the
+ * account in use is mirrored into the default dir. Remove the extension at ANY
+ * instant, and Claude Code carries on as if it had never been there.
+ *
+ * This is not "a token in one more place": `~/.claude/.credentials.json` is exactly
+ * where Claude Code keeps its token with no extension installed at all — the
+ * canonical location, not a new exposure. Forgetting an account still clears it
+ * from here too (see dirsHoldingToken).
+ *
+ * Identity goes to `~/.claude.json` at the HOME ROOT, not into the dir: that is
+ * where vanilla Claude Code reads it from (verified — a CLAUDE_CONFIG_DIR account
+ * keeps it inside the dir instead, and writing it there would leave the default
+ * account signed in with no name).
+ */
+export function mirrorToDefault(sourceDir: string, identity: AccountIdentity | null): void {
+  const defaultDir = defaultSourceDir();
+  if (isDefaultDir(sourceDir)) return; // already is the default
+  const srcToken = path.join(sourceDir, '.credentials.json');
+  if (!fs.existsSync(srcToken)) return; // signed out — nothing to mirror
+
+  try {
+    const incoming = fs.readFileSync(srcToken);
+    const dstToken = path.join(defaultDir, '.credentials.json');
+    // Compare before writing: this runs on every focus change, and rewriting an
+    // identical token would churn the file Claude Code watches.
+    if (!fs.existsSync(dstToken) || !fs.readFileSync(dstToken).equals(incoming)) {
+      fs.mkdirSync(defaultDir, { recursive: true, mode: 0o700 });
+      const tmp = `${dstToken}.tmp`;
+      fs.writeFileSync(tmp, incoming, { mode: 0o600 });
+      fs.renameSync(tmp, dstToken); // atomic: a half-written token is worse than none
+    }
+    if (!identity) return;
+
+    const cfg = path.join(os.homedir(), '.claude.json');
+    let obj: Record<string, unknown> = {};
+    try {
+      obj = JSON.parse(fs.readFileSync(cfg, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      obj = {}; // absent or unreadable — a fresh config with just the identity is fine
+    }
+    const current = obj.oauthAccount as { emailAddress?: string } | undefined;
+    if (current?.emailAddress === identity.email) return; // already consistent
+    obj.oauthAccount = {
+      ...(current ?? {}),
+      emailAddress: identity.email,
+      displayName: identity.displayName,
+      organizationName: identity.organizationName,
+    };
+    const tmp = `${cfg}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, cfg);
+  } catch {
+    // Best-effort: a failed mirror only means the default dir lags behind. The
+    // extension itself keeps working — this is insurance for its absence.
+  }
 }

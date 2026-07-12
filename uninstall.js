@@ -1,23 +1,33 @@
-// vscode:uninstall hook — runs via plain `node` when the extension is
-// uninstalled (no vscode API available).
+// vscode:uninstall hook — runs via plain `node` when the extension is uninstalled.
 //
-// The contract: leave the machine as if the extension had never been installed,
-// and leave Claude Code WORKING.
+// What VSCode actually gives us here — all four verified against its logs, and
+// every one of them a trap this file used to fall into:
 //
-//   1. All conversation history is consolidated into the default ~/.claude.
-//   2. The last-used account is handed back to vanilla Claude Code, so the user
-//      is still signed in after the uninstall.
-//   3. Everything this extension created is deleted — no stray OAuth tokens, no
-//      duplicated history, no leftover directories.
+//   1. It does NOT run when you click Uninstall. The extension is only MARKED for
+//      removal; the hook runs later, from `cleanUp() → deleteExtensionsMarkedForRemoval()`
+//      at the next server start. So by the time it runs, the world may have moved on.
+//   2. It gets FIVE SECONDS. Overrun and VSCode kills it mid-syscall
+//      ("[error] Failed to run post uninstall script … timed out" — measured at
+//      5.012s). A hook that is killed halfway through moving data destroys it.
+//   3. Because of (1), it can fire AFTER a newer version has been installed — the
+//      old version's folder is still on disk with its own copy of this script. A
+//      cleanup that deletes account stores would then wipe the LIVE install's
+//      accounts. Hence the guard below: if another copy is installed, do nothing.
+//   4. It may never run at all (folder deleted by hand, cleanup skipped). So it is
+//      best-effort by construction, and nothing may depend on it for correctness.
 //
-// Vanilla Claude Code (with CLAUDE_CONFIG_DIR unset) reads its token from
-// ~/.claude/.credentials.json and its identity/config from ~/.claude.json at the
-// HOME ROOT — verified empirically, and NOT the same layout as a CLAUDE_CONFIG_DIR
-// account, where both live inside the dir. Restoring to the wrong one would leave
-// Claude Code silently signed out, which is the bug this hook exists to prevent.
+// The contract, in priority order — earlier goals are never sacrificed for later ones:
+//   a. Never destroy a live install's data.          (the guard)
+//   b. Never lose history.                           (deadline + no destructive step before its data is safe)
+//   c. Leave Claude Code signed in and working.      (hand the account back first)
+//   d. Leave no OAuth token behind.                  (tokens go even when (b) forces us to stop early)
+//   e. Leave no leftover directories.                (only when everything above succeeded)
 //
-// Nothing here may throw: a failed uninstall hook leaves the user with a
-// half-cleaned home directory and no way to re-run it.
+// Vanilla Claude Code (CLAUDE_CONFIG_DIR unset) reads its token from
+// ~/.claude/.credentials.json and its identity from ~/.claude.json at the HOME
+// ROOT — verified empirically, and NOT the layout of a CLAUDE_CONFIG_DIR account,
+// where both sit inside the dir. Restoring to the wrong one leaves Claude Code
+// silently signed out, which is the bug this hook exists to prevent.
 'use strict';
 
 const fs = require('fs');
@@ -37,6 +47,55 @@ const SHARED_DIRS = [
 const SHARED_FILES = ['history.jsonl'];
 const SHARED_ENTRIES = [...SHARED_DIRS, ...SHARED_FILES];
 
+/**
+ * Our own budget, comfortably inside VSCode's 5s kill timer. Being killed is not
+ * an option: it happens between two syscalls of our choosing, so there is no way
+ * to be safe against it — we simply must not still be running. Every loop that can
+ * grow with the user's data checks this and stops at a consistent point instead.
+ */
+const DEADLINE_MS = 4000;
+let deadline = Infinity;
+const outOfTime = () => Date.now() > deadline;
+
+/**
+ * True if a DIFFERENT copy of this extension is still installed.
+ *
+ * VSCode defers this hook to the next server start, so the user may well have
+ * reinstalled by then — and the folder we are running from is the OLD version's,
+ * which knows nothing about that. Deleting the account stores at that point would
+ * destroy the data of a perfectly healthy install. (This is not hypothetical: a
+ * 1.3.0 folder sat in `.obsolete` with this script in it while 1.3.1 was live.)
+ *
+ * Everything needed to tell is right next to us: sibling folders in the same
+ * extensions dir, minus the ones listed in `.obsolete` (VSCode's own record of
+ * what is on its way out).
+ */
+function anotherCopyInstalled() {
+  try {
+    const root = path.dirname(__dirname); // …/extensions
+    const me = path.basename(__dirname); // publisher.name-version[-target]
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));
+    const prefix = `${pkg.publisher}.${pkg.name}-`.toLowerCase();
+    let obsolete = {};
+    try {
+      obsolete = JSON.parse(fs.readFileSync(path.join(root, '.obsolete'), 'utf-8')) || {};
+    } catch {
+      // no .obsolete → nothing is pending removal → any sibling is a live install
+    }
+    return fs.readdirSync(root, { withFileTypes: true }).some(
+      (e) =>
+        e.isDirectory() &&
+        e.name !== me &&
+        e.name.toLowerCase().startsWith(prefix) &&
+        !obsolete[e.name]
+    );
+  } catch {
+    // Cannot tell. Assume there IS one: leaving files behind is a nuisance,
+    // deleting a live install's accounts is a catastrophe.
+    return true;
+  }
+}
+
 /** The per-window working dirs this extension creates (~/.claude-windows/<id>). */
 function workingDirs(root) {
   try {
@@ -54,7 +113,7 @@ function workingDirs(root) {
  *
  * Only these are ever deleted. A `~/.claude-<name>` dir NOT in the manifest was
  * made by the user (or another tool) and is none of our business — guessing from
- * the name alone is how an uninstall destroys someone's data.
+ * the name alone is how an uninstall destroys someone else's data.
  */
 function managedStores(home, manifestFile) {
   let stores;
@@ -68,8 +127,6 @@ function managedStores(home, manifestFile) {
   return stores.filter((dir) => {
     if (typeof dir !== 'string') return false;
     const norm = path.normalize(dir);
-    // Must be a `~/.claude-<name>` dir directly under home. Never the default
-    // account, never the store or the working root (handled separately).
     if (path.dirname(norm) !== home_) return false;
     const base = path.basename(norm);
     if (!/^\.claude[-_].+$/.test(base)) return false;
@@ -77,33 +134,29 @@ function managedStores(home, manifestFile) {
   });
 }
 
-/** Byte equality, size-gated so the common "differs" case never reads a file. */
-function sameContent(a, b) {
-  try {
-    const sa = fs.statSync(a);
-    const sb = fs.statSync(b);
-    if (sa.size !== sb.size) return false;
-    return fs.readFileSync(a).equals(fs.readFileSync(b));
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Folds `src` into `dst`, keeping the newer file on a collision and dropping
- * byte-identical duplicates outright. Same rules as the extension's own merge,
- * minus the backup: by the time this runs, the copies being folded in are the
- * ones we are about to delete, and their content ends up in `dst` either way.
+ * Folds `src` into `dst` by MOVING entries, never by reading them.
+ *
+ * The previous version compared colliding files byte for byte. On a real 1.3 GB
+ * history that is 1.3 GB of reads: measured at 22 seconds — four times over the
+ * kill timer, so the hook died mid-move. Nothing here may cost more than a stat:
+ * a file that is already there and the same size is a duplicate of a store every
+ * dir was symlinked to, and gets dropped; anything else is left where it is and
+ * reported as a conflict, so the caller keeps the store instead of deleting it.
+ *
+ * Returns false if anything could not be moved (conflict, error, or out of time).
  */
-function mergeDirInto(src, dst) {
+function moveDirInto(src, dst) {
+  let complete = true;
   let entries;
   try {
     entries = fs.readdirSync(src, { withFileTypes: true });
   } catch {
-    return;
+    return false;
   }
   fs.mkdirSync(dst, { recursive: true, mode: 0o700 });
   for (const entry of entries) {
+    if (outOfTime()) return false;
     const s = path.join(src, entry.name);
     const d = path.join(dst, entry.name);
     try {
@@ -111,17 +164,17 @@ function mergeDirInto(src, dst) {
       if (!dstStat) {
         fs.renameSync(s, d);
       } else if (entry.isDirectory() && dstStat.isDirectory()) {
-        mergeDirInto(s, d);
-      } else if (sameContent(s, d)) {
-        fs.rmSync(s, { force: true });
-      } else if (fs.statSync(s).mtimeMs > dstStat.mtimeMs) {
-        fs.rmSync(d, { recursive: true, force: true });
-        fs.renameSync(s, d);
+        if (!moveDirInto(s, d)) complete = false;
+      } else if (entry.isFile() && dstStat.isFile() && fs.statSync(s).size === dstStat.size) {
+        fs.rmSync(s, { force: true }); // same size ⇒ the same file, seen twice
+      } else {
+        complete = false; // a real divergence — never resolved by guessing
       }
     } catch {
-      // Best-effort per entry: one unreadable file must not abandon the rest.
+      complete = false;
     }
   }
+  return complete;
 }
 
 /** Folds a line-based file (history.jsonl) into `dst`, skipping lines it has. */
@@ -137,61 +190,48 @@ function mergeFileInto(src, dst) {
       const prefix = existing && !existing.endsWith('\n') ? '\n' : '';
       fs.appendFileSync(dst, `${prefix}${incoming.join('\n')}\n`, { mode: 0o600 });
     }
+    fs.rmSync(src, { force: true });
+    return true;
   } catch {
-    /* best-effort */
+    return false;
   }
 }
 
 /**
- * Brings every trace of the history into the default dir.
+ * Brings the history into the default dir, where plain Claude Code will look for it.
  *
- * The shared store is MOVED, not copied — a rename within the same filesystem is
- * instant and needs no free space, where a copy of a multi-gigabyte transcript
- * archive is neither. Where a rename cannot work (the store and the home dir on
- * different filesystems, a permission quirk), it falls back to a copy.
+ * In the normal case every entry is a symlink into the store, so this is one
+ * unlink + one rename per entry — eight syscalls, measured at 135 ms regardless of
+ * how many gigabytes the store holds. The unlink and the rename sit next to each
+ * other on purpose: a kill between two ENTRIES leaves the rest still symlinked to
+ * an intact store, and loses nothing.
  *
- * Returns true only if EVERY entry made it across. The caller must not delete the
- * store otherwise: by then the symlinks that pointed at it are already gone, so a
- * silently-swallowed failure plus a confident `rm -rf` is how an uninstall eats
- * years of transcripts.
+ * Returns true only if EVERY entry made it. The caller must not delete the store
+ * otherwise — by then it is the only copy of whatever stayed behind.
  */
 function consolidateHistory(defaultDir, store, otherDirs) {
   let complete = true;
   fs.mkdirSync(defaultDir, { recursive: true, mode: 0o700 });
 
-  // Every dir's entries are symlinks into the store while sharing is on. Drop
-  // them all first: they are about to dangle, and the default dir must be free
-  // for the store's real content to take its place.
-  for (const dir of [defaultDir, ...otherDirs]) {
-    for (const name of SHARED_ENTRIES) {
-      const p = path.join(dir, name);
-      try {
-        const st = fs.lstatSync(p, { throwIfNoEntry: false });
-        if (st && st.isSymbolicLink()) fs.unlinkSync(p);
-      } catch {
-        /* best-effort */
-      }
-    }
-  }
-
-  // The store holds the union of every account's history — move it into place.
   for (const name of SHARED_ENTRIES) {
+    if (outOfTime()) return false;
     const src = path.join(store, name);
     const dst = path.join(defaultDir, name);
     try {
       if (!fs.existsSync(src)) continue;
-      if (!fs.existsSync(dst)) {
-        try {
-          fs.renameSync(src, dst);
-        } catch {
-          // Cross-device or permission: copy instead. Slower, but the alternative
-          // is losing the entry when the store is deleted below.
-          fs.cpSync(src, dst, { recursive: true });
-        }
+      const dstStat = fs.lstatSync(dst, { throwIfNoEntry: false });
+      // The common case: our own symlink. Drop it and move the real thing in.
+      if (dstStat && dstStat.isSymbolicLink()) {
+        fs.unlinkSync(dst);
+        fs.renameSync(src, dst);
+        continue;
+      }
+      if (!dstStat) {
+        fs.renameSync(src, dst);
       } else if (SHARED_FILES.includes(name)) {
-        mergeFileInto(src, dst);
-      } else {
-        mergeDirInto(src, dst);
+        if (!mergeFileInto(src, dst)) complete = false;
+      } else if (!moveDirInto(src, dst)) {
+        complete = false;
       }
     } catch {
       complete = false;
@@ -199,19 +239,24 @@ function consolidateHistory(defaultDir, store, otherDirs) {
   }
 
   // Versions up to 1.2.7 had a setting that turned sharing off, leaving real
-  // history inside the dirs which the store never saw. Fold it in too, or
-  // uninstalling one of those installs would delete it.
+  // history inside the account dirs that the store never saw. Fold that in too, or
+  // deleting those dirs below would delete the only copy.
   for (const dir of otherDirs) {
     for (const name of SHARED_ENTRIES) {
+      if (outOfTime()) return false;
       const src = path.join(dir, name);
       const dst = path.join(defaultDir, name);
       try {
         const st = fs.lstatSync(src, { throwIfNoEntry: false });
-        if (!st) continue;
-        if (st.isDirectory()) mergeDirInto(src, dst);
-        else if (st.isFile()) {
-          if (fs.existsSync(dst)) mergeFileInto(src, dst);
-          else fs.renameSync(src, dst);
+        if (!st || st.isSymbolicLink()) continue; // symlinks die with their dir (rm doesn't follow them)
+        if (st.isDirectory()) {
+          if (!moveDirInto(src, dst)) complete = false;
+        } else if (st.isFile()) {
+          if (fs.existsSync(dst)) {
+            if (!mergeFileInto(src, dst)) complete = false;
+          } else {
+            fs.renameSync(src, dst);
+          }
         }
       } catch {
         complete = false;
@@ -224,10 +269,9 @@ function consolidateHistory(defaultDir, store, otherDirs) {
 /**
  * The dir holding the account to hand back: the freshest OAuth token on disk.
  *
- * Working dirs come first because they are where Claude Code actually ran — their
- * token may have been refreshed since the store was written, and their config is
- * the live one. Ties go to whichever was touched last, which is the account the
- * user was using when they uninstalled.
+ * Working dirs win over stores when both have one: a working dir is where Claude
+ * Code actually ran, so its token is the one that got refreshed and its config is
+ * the live one, where a store's config is only a snapshot from when it was saved.
  */
 function lastUsedDir(working, stores) {
   const freshest = (dirs) => {
@@ -246,9 +290,6 @@ function lastUsedDir(working, stores) {
     }
     return best;
   };
-  // Working dirs are strictly better sources when they exist: their token is the
-  // one Claude Code actually refreshed, and their config is the live one (the
-  // store's config is only ever a snapshot from when the account was saved).
   return freshest(working) ?? freshest(stores);
 }
 
@@ -257,8 +298,10 @@ function lastUsedDir(working, stores) {
  * into ~/.claude.json. Both come from the SAME dir — an identity paired with
  * another account's token is the exact desync this extension was built to fix.
  *
+ * Runs FIRST, before anything is moved or deleted: it is the one step that decides
+ * whether the user still has a working Claude Code, and it costs two small copies.
  * The config is merged over whatever ~/.claude.json already had rather than
- * replacing it, so per-project settings that predate the extension survive.
+ * replacing it, so settings that predate the extension survive.
  */
 function restoreDefaultAccount(source, defaultDir, defaultConfig) {
   try {
@@ -291,12 +334,28 @@ function restoreDefaultAccount(source, defaultDir, defaultConfig) {
   }
 }
 
+/** Deletes the OAuth token from our dirs. The one step that must happen even when we bail out. */
+function dropTokens(dirs) {
+  for (const dir of dirs) {
+    try {
+      fs.rmSync(path.join(dir, '.credentials.json'), { force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 function main() {
-  // On unsupported platforms the extension never created anything (it activates
-  // into an inert mode there), so there is nothing to revert — and guessing at
-  // other OSes' file layouts on uninstall is exactly the kind of manipulation
-  // the inert mode promises not to do.
+  // On unsupported platforms the extension activates into an inert mode and never
+  // created anything, so there is nothing to revert — and guessing at other OSes'
+  // file layouts on uninstall is exactly the manipulation that mode promises not
+  // to do.
   if (os.platform() !== 'linux') return;
+
+  // A newer copy is live and this data is now ITS data. Touch nothing.
+  if (anotherCopyInstalled()) return;
+
+  deadline = Date.now() + DEADLINE_MS;
 
   const home = os.homedir();
   const defaultDir = path.join(home, '.claude');
@@ -308,21 +367,26 @@ function main() {
   const stores = managedStores(home, path.join(workRoot, '.manifest.json'));
   const ours = [...working, ...stores];
 
-  // Order matters: the account must be captured before its dir is emptied, and
-  // the history moved out before anything is deleted.
+  // 1. Leave Claude Code working. Cheap, and everything after it is optional.
   const source = lastUsedDir(working, stores);
-  const consolidated = consolidateHistory(defaultDir, store, ours);
   if (source) restoreDefaultAccount(source, defaultDir, defaultConfig);
 
-  // Our dirs now hold nothing but duplicated credentials and config, so they go
-  // regardless — leaving a stray OAuth token behind is the one outcome worse than
-  // leaving an empty folder. A short-lived earlier version also kept token copies
-  // in ~/.claude-vault.
-  const doomed = [...ours, workRoot, path.join(home, '.claude-vault')];
-  // The store only goes if EVERY entry of it reached ~/.claude. If anything was
-  // left behind, it is now the only copy of that history — keep it.
-  if (consolidated) doomed.push(store);
-  for (const dir of doomed) {
+  // 2. Get the history somewhere plain Claude Code can see it.
+  const consolidated = consolidateHistory(defaultDir, store, ours);
+
+  // 3. If any history stayed behind, the dirs holding it are now its only copy —
+  //    keep them. The tokens still go: a leftover folder is untidy, a leftover
+  //    OAuth token is a credential we promised not to leave lying around.
+  if (!consolidated) {
+    dropTokens(ours);
+    return;
+  }
+
+  // 4. Everything is safe in ~/.claude. Our dirs hold nothing but duplicated
+  //    credentials, config and dangling symlinks (rmSync does not follow those,
+  //    so the store's content is never at risk here). A short-lived earlier
+  //    version also kept token copies in ~/.claude-vault.
+  for (const dir of [...ours, workRoot, store, path.join(home, '.claude-vault')]) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {

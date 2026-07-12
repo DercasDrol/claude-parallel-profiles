@@ -106,6 +106,8 @@ The details that make it reliable — each one a bug found and fixed:
 - **No competing source of truth.** A machine-wide `CLAUDE_CONFIG_DIR` in `claudeCode.environmentVariables` or `terminal.integrated.env` would force all windows onto one account — the extension strips it and keeps isolation in `process.env` only.
 - **Terminals follow the window.** Integrated terminals get the window's account via VSCode's environment-variable API. External terminals (outside VSCode) keep using the default `~/.claude`.
 - **Reload safety.** Automatic reloads (after a forget or an in-window sign-in) go through a circuit breaker: state is corrected *before* reloading, and at most one automatic reload per minute — a misbehaving edge case degrades to a message with a button, never a reload loop.
+- **Survives its own absence.** The account you last used is mirrored into Claude Code's own default `~/.claude` on every sync, so if the extension is ever gone — uninstalled, disabled, or not yet activated — Claude Code is already signed in there and just works. Nothing important waits on the uninstall script, which VSCode defers to its next restart and may never run.
+- **Found where it runs.** The extension is published as a single universal package, not per-platform. In WSL and Remote-SSH it executes on the Linux *remote*, but the VSCode *client* that resolves the Marketplace is often Windows or macOS — a Linux-only build would be invisible to that client, which then reports the extension as missing and never updates it. The Linux requirement is enforced at runtime instead (the inert mode above).
 
 ---
 
@@ -125,19 +127,23 @@ This extension is built to manage credentials, so it holds itself to a strict po
 - **Minimal footprint elsewhere:** the workspace folder path is hashed to tell windows apart; `claude auth status` is asked (locally, read-only) to confirm a directory is signed in; on Linux/WSL the process list is scanned only during *Forget*, to stop `claude` processes running on the token being deleted.
 - **Self-restricted in the VSCode manifest:** disabled in virtual workspaces, and in Restricted Mode (untrusted folders) it never reads workspace content — only the folder's path, to tell windows apart ([`capabilities`](package.json)).
 - **Inert off Linux.** On unsupported platforms it performs no operations at all — no file reads, no writes, no account changes; the uninstall hook is guarded the same way.
-- **Uninstalling cleans up after itself:** every directory the extension created is deleted, so no OAuth token it ever copied is left behind — see [Uninstalling](#uninstalling).
+- **Uninstalling cleans up after itself:** the directories the extension created are deleted and stray OAuth tokens wiped; the one token it leaves is in `~/.claude`, exactly where Claude Code keeps its own login with no extension installed — see [Uninstalling](#uninstalling).
 
 ---
 
 ## Uninstalling
 
-Removing the extension leaves the machine as if it had never been installed — **and leaves Claude Code signed in and working**. Automatically, on uninstall:
+Removing the extension leaves the machine as if it had never been installed — **and leaves Claude Code signed in and working**.
 
-- **Your history is consolidated** into the default `~/.claude` — the shared store is *moved* there (instant, whatever its size), and any history an account kept to itself is folded in. Nothing is lost: plain Claude Code has one history, not one per account.
-- **Your last-used account is handed back**, so Claude Code keeps working exactly where you left off. Its token and its identity go where vanilla Claude Code looks for them (`~/.claude/.credentials.json` and `~/.claude.json`) — together, never mismatched. Settings that predate the extension are merged, not overwritten.
+**You stay signed in the whole time, not just at the end.** While the extension runs it continuously keeps Claude Code's own default account (`~/.claude`) pointed at whichever account you last used — the normal place Claude Code keeps its login. So the instant the extension is gone — uninstalled, disabled, or simply not activated yet — plain Claude Code is already signed in and working. This does **not** depend on the uninstall step running: VSCode defers uninstall scripts to its next restart (and may skip them), so nothing that matters is trusted to one.
+
+When the uninstall script *does* run, it tidies up:
+
+- **Your history is consolidated** into `~/.claude` — the shared store is *moved* there (instant, whatever its size; a few hundred milliseconds even for gigabytes), and any history an account kept to itself is folded in. Plain Claude Code has one history, not one per account.
 - **Every directory the extension created is deleted** — the account stores, the per-window working copies, the shared store. No duplicated history, and no OAuth token left in a folder only this extension ever used.
+- **If anything can't be moved in time**, the script stops rather than risk your data: it still wipes stray tokens, but keeps any directory whose history hasn't safely reached `~/.claude`. (It runs on a strict deadline — VSCode kills uninstall scripts after five seconds — so it never reads a file it can only move.)
 
-Your other accounts stay signed out afterwards — sign into them the normal way. Directories the extension didn't create are never touched: it deletes only what its own registry says it made.
+Your other accounts stay signed out afterwards — sign into them the normal way. Directories the extension didn't create are never touched: it deletes only what a manifest of its own says it made, and if a newer copy of the extension is already installed the script does nothing at all.
 
 ---
 

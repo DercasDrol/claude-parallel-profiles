@@ -106,6 +106,41 @@ export class AccountRegistry {
     return this.list().find((a) => path.normalize(a.dir) === norm);
   }
 
+  /** The email an account resolves to (cached, else read live from its dir). */
+  emailOf(a: Account): string | undefined {
+    return a.email ?? readIdentity(a.dir)?.email;
+  }
+
+  /** A saved account whose identity matches this email, if any. */
+  savedForEmail(email: string): Account | undefined {
+    return this.list().find((a) => this.emailOf(a) === email);
+  }
+
+  /**
+   * The accounts collapsed to one per email — the old paradigm could snapshot
+   * the same account into several dirs, so the raw list may hold duplicates.
+   * The canonical copy (name equal to the email's local-part slug) wins; entries
+   * with no resolvable email can't be deduped and are kept as-is.
+   */
+  listUniqueByEmail(): Account[] {
+    const slug = (email: string) =>
+      (email.split('@')[0] || '').replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase();
+    const chosen = new Map<string, Account>();
+    const noEmail: Account[] = [];
+    for (const a of this.list()) {
+      const email = this.emailOf(a);
+      if (!email) {
+        noEmail.push(a);
+        continue;
+      }
+      const current = chosen.get(email);
+      if (!current || (a.name === slug(email) && current.name !== slug(email))) {
+        chosen.set(email, a);
+      }
+    }
+    return [...chosen.values(), ...noEmail].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   async add(account: Account): Promise<void> {
     const list = this.list().filter((a) => a.name !== account.name);
     list.push(account);

@@ -1,8 +1,8 @@
 {
   "name": "claude-parallel-accounts",
   "displayName": "Claude Parallel Accounts",
-  "description": "Run a different Claude Code account in each VSCode window simultaneously — capture, switch, and isolate accounts per window.",
-  "version": "1.0.5",
+  "description": "Companion for the Claude Code VS Code extension: run a different Claude account in each VSCode window simultaneously — capture, switch, and isolate accounts per window.",
+  "version": "1.1.5",
   "publisher": "DercasDrol",
   "icon": "images/icon.png",
   "repository": {
@@ -16,11 +16,25 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
-  "keywords": ["claude", "claude code", "anthropic", "profiles", "profile manager", "accounts", "multi-account"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "claude",
+    "claude code",
+    "anthropic",
+    "profiles",
+    "profile manager",
+    "accounts",
+    "multi-account"
+  ],
+  "activationEvents": [
+    "*"
+  ],
   "main": "./dist/extension.js",
-  "extensionKind": ["workspace"],
+  "extensionKind": [
+    "workspace"
+  ],
   "contributes": {
     "commands": [
       {
@@ -29,23 +43,13 @@
         "category": "Claude Accounts"
       },
       {
-        "command": "claudeProfiles.switchAccountReload",
-        "title": "Switch Account for This Window (Reload)",
-        "category": "Claude Accounts"
-      },
-      {
         "command": "claudeProfiles.captureAccount",
         "title": "Save Current Account",
         "category": "Claude Accounts"
       },
       {
-        "command": "claudeProfiles.showConversations",
-        "title": "Show Live Conversations & Accounts",
-        "category": "Claude Accounts"
-      },
-      {
         "command": "claudeProfiles.showStatus",
-        "title": "Show Account Menu",
+        "title": "Account Quick Action",
         "category": "Claude Accounts"
       },
       {
@@ -61,11 +65,6 @@
           "type": "boolean",
           "default": true,
           "description": "Share conversation history across all accounts (~/.claude-shared): projects, sessions and related state are symlinked from every account's data dir, so a chat continues after switching accounts. Credentials and identity stay per-account. Disable to keep each account's history fully isolated."
-        },
-        "claudeProfiles.reloadOnSwitch": {
-          "type": "boolean",
-          "default": false,
-          "description": "Reload the whole window after switching accounts. Normally the active conversation switches live on its next message; enable this only if you want a guaranteed full re-read via a window reload."
         }
       }
     }

@@ -1,4 +1,6 @@
 import { execFile } from 'child_process';
+import { log } from './log';
+import { readIdentity } from './accounts';
 
 /**
  * Thin wrapper around the `claude` CLI's auth commands, scoped to a specific
@@ -56,8 +58,22 @@ export async function getAuthStatus(
   try {
     const out = await runClaude('auth status --json', dir, timeoutMs);
     const parsed = JSON.parse(out) as AuthStatus;
+    // Recent Claude Code versions (2.1.x) return `email: null` from
+    // `auth status --json` even when logged in via claude.ai. The email still
+    // lives in the account's .claude.json (oauthAccount.emailAddress), so fall
+    // back to it — otherwise every identity-dependent flow (capture, switch,
+    // dedupe-by-email) silently bails out with "no signed-in account".
+    if (parsed.loggedIn && !parsed.email) {
+      const id = readIdentity(dir);
+      if (id?.email) {
+        parsed.email = id.email;
+        if (!parsed.orgName && id.organizationName) parsed.orgName = id.organizationName;
+      }
+    }
+    log(`auth status(${dir}): loggedIn=${parsed.loggedIn} email=${parsed.email ?? '(none)'}`);
     return parsed;
-  } catch {
+  } catch (err) {
+    log(`auth status(${dir}) FAILED: ${(err as Error).message.split('\n')[0]}`);
     return null;
   }
 }

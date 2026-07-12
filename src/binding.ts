@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { Account } from './accounts';
+import { log } from './log';
 
 /**
  * Per-window binding of a Claude account.
@@ -101,6 +102,7 @@ export class WindowBinding {
    * whether to start a new conversation or reload the window.
    */
   async bind(account: Account): Promise<void> {
+    log(`bind: ${account.name} → ${account.dir} (was ${process.env[ENV_VAR] ?? '(default)'})`);
     process.env[ENV_VAR] = account.dir;
     await this.context.workspaceState.update(ACTIVE_KEY, account.name);
     const repo = this.getRepoKey();
@@ -122,24 +124,63 @@ export class WindowBinding {
   }
 
   /**
-   * Ensures the machine-scoped `claudeCode.environmentVariables` setting does
-   * NOT define CLAUDE_CONFIG_DIR. That setting is shared across every window on
-   * the machine (scope: machine) and would override our per-window process.env,
-   * which is exactly the bug that made all windows share one account.
+   * Ensures NO settings define CLAUDE_CONFIG_DIR, in ANY scope. Two sources
+   * override our per-window process.env and make binding look like a no-op:
+   *  - `claudeCode.environmentVariables` (Claude Code merges it OVER the
+   *    process env when spawning `claude`) — must be purged from global,
+   *    workspace and folder scopes, not just global;
+   *  - `terminal.integrated.env.*` — v1.0.0 of this extension wrote
+   *    CLAUDE_CONFIG_DIR there; it hijacks any `claude` run in a terminal.
    *
-   * Returns true if it removed an entry (i.e. the machine setting was dirty).
+   * Returns true if anything was removed.
    */
   async clearMachineOverride(): Promise<boolean> {
+    let cleared = false;
+    const tryUpdate = async (
+      cfg: vscode.WorkspaceConfiguration,
+      key: string,
+      value: unknown,
+      target: vscode.ConfigurationTarget
+    ) => {
+      try {
+        await cfg.update(key, value, target);
+        cleared = true;
+      } catch {
+        /* scope unavailable (e.g. no workspace open) — nothing to clear there */
+      }
+    };
+
     const cfg = vscode.workspace.getConfiguration('claudeCode');
-    const envVars =
-      cfg.get<Array<{ name: string; value: string }>>('environmentVariables') ?? [];
-    const filtered = envVars.filter((e) => e.name !== ENV_VAR);
-    if (filtered.length === envVars.length) return false;
-    await cfg.update(
-      'environmentVariables',
-      filtered.length > 0 ? filtered : undefined,
-      vscode.ConfigurationTarget.Global
-    );
-    return true;
+    const info = cfg.inspect<Array<{ name: string; value: string }>>('environmentVariables');
+    const envScopes: Array<
+      [Array<{ name: string; value: string }> | undefined, vscode.ConfigurationTarget]
+    > = [
+      [info?.globalValue, vscode.ConfigurationTarget.Global],
+      [info?.workspaceValue, vscode.ConfigurationTarget.Workspace],
+      [info?.workspaceFolderValue, vscode.ConfigurationTarget.WorkspaceFolder],
+    ];
+    for (const [value, target] of envScopes) {
+      if (!value) continue;
+      const filtered = value.filter((e) => e.name !== ENV_VAR);
+      if (filtered.length === value.length) continue;
+      await tryUpdate(cfg, 'environmentVariables', filtered.length ? filtered : undefined, target);
+    }
+
+    const term = vscode.workspace.getConfiguration('terminal.integrated');
+    for (const key of ['env.linux', 'env.osx', 'env.windows']) {
+      const tinfo = term.inspect<Record<string, string>>(key);
+      const termScopes: Array<[Record<string, string> | undefined, vscode.ConfigurationTarget]> = [
+        [tinfo?.globalValue, vscode.ConfigurationTarget.Global],
+        [tinfo?.workspaceValue, vscode.ConfigurationTarget.Workspace],
+        [tinfo?.workspaceFolderValue, vscode.ConfigurationTarget.WorkspaceFolder],
+      ];
+      for (const [value, target] of termScopes) {
+        if (!value || !(ENV_VAR in value)) continue;
+        const rest = { ...value };
+        delete rest[ENV_VAR];
+        await tryUpdate(term, key, Object.keys(rest).length ? rest : undefined, target);
+      }
+    }
+    return cleared;
   }
 }

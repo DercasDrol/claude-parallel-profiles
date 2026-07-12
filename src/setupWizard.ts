@@ -7,7 +7,6 @@ import { WindowBinding } from './binding';
 import { getAuthStatus } from './cli';
 import { snapshotAccount, defaultSourceDir } from './capture';
 import { ensureSharedHistory } from './sharedHistory';
-import { listLiveConversations } from './diagnostics';
 
 /**
  * User-facing flows, all driven from the extension — no terminal/CLI login.
@@ -32,10 +31,15 @@ export class SetupWizard {
    *
    * Returns the saved (or reused) account, or undefined if nothing was saved.
    * With `quiet`, success toasts are suppressed (for composite flows like
-   * save-then-switch); warnings are always shown.
+   * save-then-switch); warnings are always shown. `sourceDir` overrides where
+   * the account is read from — used to "adopt" whatever account Claude Code
+   * just signed into (which always lands in the default dir), regardless of
+   * what this window is currently bound to.
    */
-  async captureCurrentAccount(opts: { quiet?: boolean } = {}): Promise<Account | undefined> {
-    const sourceDir = this.binding.getEnvDir() ?? defaultSourceDir();
+  async captureCurrentAccount(
+    opts: { quiet?: boolean; sourceDir?: string } = {}
+  ): Promise<Account | undefined> {
+    const sourceDir = opts.sourceDir ?? this.binding.getEnvDir() ?? defaultSourceDir();
 
     const status = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'Reading current Claude account…' },
@@ -157,8 +161,8 @@ export class SetupWizard {
 
   // ─── Switch the current window's account ────────────────────────────────────
 
-  async switchAccountInteractive(forceReload = false): Promise<void> {
-    const accounts = this.registry.list();
+  async switchAccountInteractive(): Promise<void> {
+    const accounts = this.registry.listUniqueByEmail();
     if (accounts.length === 0) {
       const pick = await vscode.window.showInformationMessage(
         'No saved accounts yet. Sign in with Claude Code, then save the current account.',
@@ -170,23 +174,22 @@ export class SetupWizard {
 
     const activeName = this.binding.getActiveName();
     const currentDir = this.binding.getEnvDir() ?? defaultSourceDir();
+    const currentEmail = readIdentity(currentDir)?.email;
     type Item = vscode.QuickPickItem & { account?: Account; capture?: boolean };
     // The email is the account's identity — lead with it; the dir is detail.
     const items: Item[] = accounts.map((a) => ({
-      label: `${a.name === activeName ? '$(check) ' : '$(account) '}${a.email ?? readIdentity(a.dir)?.email ?? a.name}`,
+      label: `${a.name === activeName ? '$(check) ' : '$(account) '}${this.registry.emailOf(a) ?? a.name}`,
       description: a.name === activeName ? 'current' : '',
       detail: a.dir,
       account: a,
     }));
-    // Offer saving only when the current account actually isn't saved yet.
-    if (!this.registry.getByDir(currentDir)) {
+    // Offer saving only when the current account (by email) isn't saved yet.
+    if (currentEmail && !this.registry.savedForEmail(currentEmail)) {
       items.push({ label: '$(save) Save current account…', capture: true });
     }
 
     const picked = await vscode.window.showQuickPick(items, {
-      title: forceReload
-        ? 'Switch account for this window (will reload)'
-        : 'Switch Claude account for this window',
+      title: 'Switch Claude account for this window (reloads the window)',
       placeHolder: 'Pick the account this window should use',
     });
     if (!picked) return;
@@ -196,7 +199,7 @@ export class SetupWizard {
     }
     if (picked.account) {
       if (!(await this.maybeSaveCurrentBeforeSwitch(picked.account))) return; // cancelled
-      await this.switchTo(picked.account, forceReload);
+      await this.switchTo(picked.account);
     }
   }
 
@@ -207,10 +210,10 @@ export class SetupWizard {
    */
   private async maybeSaveCurrentBeforeSwitch(target: Account): Promise<boolean> {
     const dir = this.binding.getEnvDir() ?? defaultSourceDir();
-    if (this.registry.getByDir(dir)) return true; // already saved — nothing to lose
     if (path.normalize(dir) === path.normalize(target.dir)) return true;
     const email = readIdentity(dir)?.email;
     if (!email) return true; // not signed in — nothing to save
+    if (this.registry.savedForEmail(email)) return true; // already saved — nothing to lose
     const pick = await vscode.window.showWarningMessage(
       `The account this window uses now (${email}) is not saved. ` +
         `If you switch without saving, this extension won't be able to switch back to it.`,
@@ -229,79 +232,25 @@ export class SetupWizard {
   }
 
   /**
-   * Binds the window to the account by mutating this host's process.env. Claude
-   * Code reads CLAUDE_CONFIG_DIR fresh per request, so the Usage panel and any
-   * NEW conversation immediately use the new account. A conversation already in
-   * progress keeps the account it was started with until you start a new one
-   * (or enable reloadOnSwitch). Other windows are unaffected.
+   * Binds the window to the account, then reloads it.
+   *
+   * The reload is NOT optional: Claude Code reads the account (identity shown in
+   * its panel) from `process.env.CLAUDE_CONFIG_DIR` only when its extension host
+   * activates, and it keeps a long-lived session process — so a live env change
+   * is invisible to it. Its identity and the billed token only move to the new
+   * account after a fresh activation. On reload our extension (activated on `*`,
+   * before Claude Code) re-applies the binding first, so Claude Code reads the
+   * new account for BOTH the shown identity and the token.
    */
-  async switchTo(account: Account, forceReload = false): Promise<void> {
+  async switchTo(account: Account): Promise<void> {
     await this.binding.bind(account);
-
-    const cfg = vscode.workspace.getConfiguration('claudeProfiles');
-    if (forceReload || cfg.get<boolean>('reloadOnSwitch', false)) {
-      await vscode.commands.executeCommand('workbench.action.reloadWindow');
-      return;
-    }
-
-    // One toast, with the reload nuance explained exactly when it matters —
-    // this replaces the separate "Switch + reload" menu item.
-    const email = account.email ?? readIdentity(account.dir)?.email;
-    const pick = await vscode.window.showInformationMessage(
-      `This window now uses ${email ?? account.name}. New conversations switch immediately; ` +
-        `a chat already in progress stays on the previous account until you start a new one.`,
-      'Reload window'
-    );
-    if (pick === 'Reload window') {
-      await vscode.commands.executeCommand('workbench.action.reloadWindow');
-    }
-  }
-
-  // ─── Diagnostics: live conversations ────────────────────────────────────────
-
-  /**
-   * Shows every running Claude conversation subprocess and the account its
-   * environment is pinned to (ground truth — a running chat can't change it).
-   */
-  async showLiveConversations(): Promise<void> {
-    const convs = listLiveConversations();
-    if (convs.length === 0) {
-      vscode.window.showInformationMessage(
-        'No live Claude conversations found (or /proc is unavailable on this platform).'
-      );
-      return;
-    }
-
-    // Resolve each unique dir to an email once.
-    const dirs = [...new Set(convs.map((c) => c.dir))];
-    const emails = new Map<string, string | undefined>();
-    await Promise.all(
-      dirs.map(async (d) => {
-        const s = await getAuthStatus(d, 8000);
-        emails.set(d, s?.email ?? this.registry.getByDir(d)?.email ?? undefined);
-      })
-    );
-
-    const items = convs.map((c) => {
-      const name = this.registry.getByDir(c.dir)?.name;
-      const email = emails.get(c.dir);
-      return {
-        label: `$(comment-discussion) ${email ?? name ?? path.basename(c.dir)}`,
-        description: `pid ${c.pid}${name ? ` · ${name}` : ''}`,
-        detail: `${c.dir}${c.cwd ? `  ·  cwd: ${c.cwd}` : ''}`,
-      } satisfies vscode.QuickPickItem;
-    });
-
-    await vscode.window.showQuickPick(items, {
-      title: `Live Claude conversations (${convs.length})`,
-      placeHolder: 'Each row = one running chat and the account it is pinned to',
-    });
+    await vscode.commands.executeCommand('workbench.action.reloadWindow');
   }
 
   // ─── Remove an account ──────────────────────────────────────────────────────
 
   async removeAccountInteractive(): Promise<void> {
-    const accounts = this.registry.list();
+    const accounts = this.registry.listUniqueByEmail();
     if (accounts.length === 0) {
       vscode.window.showInformationMessage('No accounts to remove.');
       return;
@@ -332,12 +281,21 @@ export class SetupWizard {
     );
     if (choice !== 'Forget') return;
 
-    await this.registry.forget(picked.account);
-    // Release every reference: this window's env (so it really falls back to
-    // the default) and the repo→account memory of every folder pointing at it.
-    await this.binding.forget(picked.account);
+    // Forget EVERY saved copy of this email — the old paradigm may have snapshot
+    // the same account into several dirs, and the user expects "forget X" to
+    // remove all of them, not leave a duplicate behind. All dirs stay on disk.
+    const targetEmail = this.registry.emailOf(picked.account);
+    const copies = this.registry
+      .list()
+      .filter((a) => (targetEmail ? this.registry.emailOf(a) === targetEmail : a.name === picked.account.name));
+    for (const copy of copies) {
+      await this.registry.forget(copy);
+      // Release every reference: this window's env (so it really falls back to
+      // the default) and the repo→account memory of every folder pointing at it.
+      await this.binding.forget(copy);
+    }
     vscode.window.showInformationMessage(
-      `Forgot ${email}. Its data directory is untouched — save the account again to restore it.`
+      `Forgot ${email}. Its data ${copies.length > 1 ? 'directories remain' : 'directory remains'} on disk — save the account again to restore it.`
     );
   }
 }

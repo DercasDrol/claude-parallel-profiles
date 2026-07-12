@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { AccountRegistry, readIdentity } from './accounts';
+import { log } from './log';
 import { WindowBinding } from './binding';
 import { getAuthStatus, AuthStatus } from './cli';
 import { defaultSourceDir } from './capture';
@@ -50,6 +51,16 @@ export class StatusBarManager implements vscode.Disposable {
 
   initialize(): void {
     this.item.show();
+    this.refresh();
+  }
+
+  /**
+   * Force a re-confirmation of this window's account and repaint. Called by the
+   * account watcher when an identity file changes, so the bar never lags behind
+   * an account switch made in Claude Code.
+   */
+  reconfirm(): void {
+    this.statusCache.delete(this.effectiveDir());
     this.refresh();
   }
 
@@ -105,16 +116,28 @@ export class StatusBarManager implements vscode.Disposable {
       // extra glyph is ○ = "not saved yet"; its meaning is spelled out in the
       // tooltip. No spinner while re-confirming: a blinking icon next to a
       // perfectly fine account reads as a problem that isn't there.
-      const isSaved = Boolean(savedName || active);
+      // "Saved" means this ACCOUNT (by email) is saved somewhere — not that
+      // this exact dir is a registry entry. Otherwise a window sitting on the
+      // default dir shows ○ even though the same account was already saved as a
+      // named copy in another window.
+      const savedByEmail = email ? this.registry.savedForEmail(email) : undefined;
+      const isSaved = Boolean(savedName || active || savedByEmail);
       this.item.text = `$(account) ${email}${isSaved ? '' : ' $(circle-outline)'}`;
       // The tooltip doubles as the action menu: VSCode cannot anchor a real
       // menu to a status bar item, but a trusted-markdown hover CAN hold
       // command links — so the actions appear right above the button.
-      const hasOthers = this.registry.list().some((a) => a.name !== (savedName ?? active));
+      // Count accounts by distinct email so a duplicated-email copy doesn't look
+      // like a separate account to switch to.
+      const unique = this.registry.listUniqueByEmail();
+      const hasOthers = unique.some((a) => this.registry.emailOf(a) !== email);
+      // The hover card is the FULL menu (incl. rare actions like Forget);
+      // clicking the item fast-paths straight to the one meaningful action.
       const actions = [
         !isSaved ? '[$(save) Save this account](command:claudeProfiles.captureAccount "Save it so you can switch back to it later")' : '',
         hasOthers ? '[$(arrow-swap) Switch account](command:claudeProfiles.switchAccount "Pick another account for this window")' : '',
-        '[$(comment-discussion) Live conversations](command:claudeProfiles.showConversations "Which account each running chat uses")',
+        unique.length > 0
+          ? '[$(trash) Forget…](command:claudeProfiles.removeProfile "Hide a saved account from the list — nothing is deleted")'
+          : '',
       ].filter(Boolean);
       const md = new vscode.MarkdownString(
         [
@@ -155,82 +178,53 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   /**
-   * Context-aware action menu. Identity lives in the title (not a selectable
-   * row), and only actions that make sense right now are offered: no switch
-   * when there is nothing to switch to, no "forget" when nothing is saved.
+   * Status bar click = the one action that makes sense right now, directly —
+   * no intermediate action list (VSCode cannot anchor a popup to the status
+   * bar anyway; the hover card is the full menu, including rare actions).
    */
-  async showQuickPick(): Promise<void> {
-    type Item = vscode.QuickPickItem & { action: string };
+  async onClick(): Promise<void> {
     const dir = this.effectiveDir();
     const status = this.cachedStatus(dir);
     const email = status?.email ?? readIdentity(dir)?.email;
-    const savedHere = this.registry.getByDir(dir);
-    const accounts = this.registry.list();
-    const others = accounts.filter((a) => a.name !== savedHere?.name);
+    // Saved is by EMAIL, not by this exact dir: a window on the default dir can
+    // still be an account that was saved (as a named copy) elsewhere.
+    const savedByEmail = email ? this.registry.savedForEmail(email) : undefined;
+    const others = this.registry
+      .listUniqueByEmail()
+      .filter((a) => this.registry.emailOf(a) !== email);
+    log(
+      `onClick: dir=${dir} email=${email ?? '(none)'} saved=${savedByEmail?.name ?? '(no)'} others=${others.length}`
+    );
 
-    const items: Item[] = [];
-    if (!email) {
-      // Don't claim "not signed in" while the very first CLI confirmation is
-      // still running — that's a false alarm during the initial seconds.
-      items.push(
-        this.statusCache.has(dir)
-          ? {
-              label: '$(info) Not signed in',
-              description: 'Open the Claude Code panel and run /login, then save the account here',
-              action: 'noop',
-            }
-          : {
-              label: '$(sync~spin) Reading current Claude account…',
-              description: 'Try again in a moment',
-              action: 'noop',
-            }
+    // Don't claim "not signed in" while the very first CLI confirmation is
+    // still running — that's a false alarm during the initial seconds.
+    if (!email && !this.statusCache.has(dir)) {
+      vscode.window.showInformationMessage(
+        'Still reading the current Claude account — try again in a moment.'
       );
+      return;
     }
-    if (email && !savedHere) {
-      items.push({
-        label: '$(save) Save this account',
-        description: `Remember ${email} so you can switch back to it later`,
-        action: 'capture',
-      });
+    if (!email) {
+      vscode.window.showWarningMessage(
+        'No signed-in Claude account. Open the Claude Code panel and run /login, then click here to save it.'
+      );
+      return;
     }
     if (others.length > 0) {
-      // Single switch entry: the switch toast offers a window reload right
-      // when that nuance becomes relevant.
-      items.push({
-        label: '$(arrow-swap) Switch account for this window',
-        description: 'New conversations switch immediately; a running chat keeps its account',
-        action: 'switch',
-      });
+      // There is something to switch to; the list includes "Save current…"
+      // when the current account isn't saved yet.
+      await vscode.commands.executeCommand('claudeProfiles.switchAccount');
+      return;
     }
-    items.push({
-      label: '$(comment-discussion) Show live conversations & accounts',
-      description: 'Which account each running chat is pinned to',
-      action: 'conversations',
-    });
-    if (accounts.length > 0) {
-      items.push({
-        label: '$(trash) Forget a saved account…',
-        description: 'Hides it from this list — nothing is deleted; save it again later to restore',
-        action: 'remove',
-      });
+    if (!savedByEmail) {
+      // Nothing to switch to, current account not saved → saving is the only move.
+      await vscode.commands.executeCommand('claudeProfiles.captureAccount');
+      return;
     }
-
-    const title = email
-      ? `Claude: ${email}${status?.subscriptionType ? ` · ${status.subscriptionType}` : ''}${savedHere ? ' (saved)' : ' (not saved)'}`
-      : 'Claude Account (this window)';
-    const picked = await vscode.window.showQuickPick(items, {
-      title,
-      placeHolder: 'Select an action',
-    });
-    if (!picked || picked.action === 'noop') return;
-
-    const map: Record<string, string> = {
-      switch: 'claudeProfiles.switchAccount',
-      capture: 'claudeProfiles.captureAccount',
-      conversations: 'claudeProfiles.showConversations',
-      remove: 'claudeProfiles.removeProfile',
-    };
-    if (map[picked.action]) await vscode.commands.executeCommand(map[picked.action]);
+    // Single saved account and it's the current one — teach the next step.
+    vscode.window.showInformationMessage(
+      `${email} is your only saved account. To add another one: sign in as it in Claude Code (/login), then click here to save it.`
+    );
   }
 
   dispose(): void {

@@ -5,6 +5,8 @@ import { StatusBarManager } from './statusBar';
 import { SetupWizard } from './setupWizard';
 import { ensureSharedHistory, unshareHistory, sharedStoreDir } from './sharedHistory';
 import { defaultSourceDir } from './capture';
+import { AccountWatcher } from './accountWatcher';
+import { log, showLog } from './log';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const registry = new AccountRegistry(context);
@@ -63,25 +65,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   applySharedHistory(false);
 
+  log(
+    `activated: env=${process.env.CLAUDE_CONFIG_DIR ?? '(default)'} ` +
+      `active=${binding.getActiveName() ?? '(none)'} ` +
+      `accounts=${registry.list().length} forgotten=${registry.listForgotten().length} ` +
+      `clearedSettingsOverride=${cleared}`
+  );
+
+  // A command that dies silently reads as "the button does nothing" — every
+  // handler logs and SHOWS its errors instead. Registration itself is also
+  // guarded: a duplicate copy of this extension (e.g. the same code published
+  // under another publisher) registering the same command IDs used to crash
+  // activation halfway and leave a dead status bar button.
+  const conflicts: string[] = [];
+  const cmd = (id: string, fn: () => Promise<unknown> | unknown): vscode.Disposable => {
+    try {
+      return vscode.commands.registerCommand(id, async () => {
+        log(`command: ${id}`);
+        try {
+          await fn();
+        } catch (err) {
+          log(`ERROR in ${id}: ${(err as Error).stack ?? String(err)}`);
+          const pick = await vscode.window.showErrorMessage(
+            `Claude Accounts: ${(err as Error).message}`,
+            'Show log'
+          );
+          if (pick === 'Show log') showLog();
+        }
+      });
+    } catch (err) {
+      conflicts.push(id);
+      log(`FAILED to register ${id}: ${(err as Error).message}`);
+      return new vscode.Disposable(() => undefined);
+    }
+  };
+
   context.subscriptions.push(
-    vscode.commands.registerCommand('claudeProfiles.switchAccount', () =>
-      wizard.switchAccountInteractive()
-    ),
-    vscode.commands.registerCommand('claudeProfiles.switchAccountReload', () =>
-      wizard.switchAccountInteractive(true)
-    ),
-    vscode.commands.registerCommand('claudeProfiles.captureAccount', () =>
-      wizard.captureCurrentAccount()
-    ),
-    vscode.commands.registerCommand('claudeProfiles.showConversations', () =>
-      wizard.showLiveConversations()
-    ),
-    vscode.commands.registerCommand('claudeProfiles.removeProfile', () =>
-      wizard.removeAccountInteractive()
-    ),
-    vscode.commands.registerCommand('claudeProfiles.showStatus', () =>
-      statusBar.showQuickPick()
-    ),
+    cmd('claudeProfiles.switchAccount', () => wizard.switchAccountInteractive()),
+    cmd('claudeProfiles.captureAccount', () => wizard.captureCurrentAccount()),
+    cmd('claudeProfiles.removeProfile', () => wizard.removeAccountInteractive()),
+    cmd('claudeProfiles.showStatus', () => statusBar.onClick()),
     // React to the user flipping claudeProfiles.sharedHistory at runtime.
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('claudeProfiles.sharedHistory')) applySharedHistory(true);
@@ -90,6 +113,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   statusBar.initialize();
+
+  // Repaint the status bar the moment this window's account identity changes on
+  // disk (e.g. a /login inside this window), so it never lags behind.
+  const watcher = new AccountWatcher(binding, () => statusBar.reconfirm());
+  watcher.start();
+  context.subscriptions.push(watcher);
+
+  if (conflicts.length > 0) {
+    void vscode.window
+      .showErrorMessage(
+        `Claude Accounts: another extension already owns ${conflicts.length} of this extension's ` +
+          `commands — most likely a duplicate copy under a different publisher ` +
+          `(e.g. "tundak.claude-parallel-accounts"). Uninstall the duplicate and reload the window.`,
+        'Show extensions'
+      )
+      .then((pick) => {
+        if (pick === 'Show extensions') {
+          void vscode.commands.executeCommand('workbench.extensions.search', 'claude parallel accounts');
+        }
+      });
+  }
 
   if (cleared) {
     vscode.window.showInformationMessage(

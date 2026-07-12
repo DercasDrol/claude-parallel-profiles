@@ -95,8 +95,8 @@ export class SetupWizard {
       .showInformationMessage(
         `Claude Accounts: ${reason} ${
           hasAccounts
-            ? 'Pick another saved account, or sign in with Claude Code (/login).'
-            : 'Sign in with Claude Code (/login).'
+            ? 'Pick another saved account, or sign in with Claude Code (its account menu, or /login).'
+            : 'Sign in with Claude Code (its account menu, or /login).'
         }`,
         ...(hasAccounts ? ['Switch account'] : [])
       )

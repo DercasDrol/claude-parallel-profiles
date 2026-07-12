@@ -18,7 +18,7 @@ Claude Code signs you into **one** account, shared by every VSCode window. If yo
 
 ## The idea in 30 seconds
 
-- **Sign in as usual** (`/login` in Claude Code). The extension notices and saves the account by itself — no buttons, no names to invent: the account *is* its email.
+- **Sign in as usual** — through Claude Code's own UI (its account menu; `/login` in the chat works too). The extension notices and saves the account by itself — nothing extra to click, no names to invent: the account *is* its email.
 - **Each window picks its account** from the status bar. Two windows run two accounts simultaneously — no logout/login dance, no cross-contamination. The window's integrated terminals get the same account.
 - **Switching reloads the window** — required, not cosmetic: Claude Code reads its account once at start-up, so only a reload makes it both *show* and *bill* the account you picked.
 - **History is one whole.** Normally chats live inside the account's data directory and vanish when you switch. Here they live in one shared store: hit a usage limit, switch account, *continue the same conversation*.
@@ -43,7 +43,7 @@ Claude Code signs you into **one** account, shared by every VSCode window. If yo
 
 1. **Install** from the [Marketplace](https://marketplace.visualstudio.com/items?itemName=DercasDrol.claude-parallel-accounts) (search "Claude Parallel Accounts").
 2. **You're probably already signed in** — the status bar shows your email, and the account is saved automatically.
-3. **Add the second account**: run `/login` in Claude Code and sign in as it. The extension saves it and reloads the window onto it — the previous account stays in the list.
+3. **Add the second account**: in Claude Code, sign in as the other account (its account menu — or `/login` in the chat). The extension saves it and reloads the window onto it — the previous account stays in the list.
 4. **Assign accounts to windows**: status bar → **Switch account**. Open another window for another project, give it the other account — both run in parallel.
 
 ---
@@ -54,7 +54,7 @@ Claude Code signs you into **one** account, shared by every VSCode window. If yo
 
 **Switching** reloads the window; after the reload both the identity Claude Code shows and the token it bills are the ones you picked.
 
-**Signing in inside a window** (`/login`) replaces only *that window's* account. The extension saves the new account, keeps the old one in the list, and reloads the window so Claude Code actually switches to it — other windows are untouched.
+**Signing in as another account inside a window** (Claude Code's account menu, or `/login`) replaces only *that window's* account. The extension saves the new account, keeps the old one in the list, and reloads the window so Claude Code actually switches to it — other windows are untouched.
 
 **Reopening a project** — the extension remembers which account each repository used last and restores it automatically (the tooltip says so).
 
@@ -62,7 +62,7 @@ Claude Code signs you into **one** account, shared by every VSCode window. If yo
 
 **Forgetting** (status bar hover → *Forget…*) asks for confirmation, then removes the account from the list, **deletes its OAuth token from every copy on this machine**, interrupts Claude sessions running on it, and reloads any window that was using it (that window then offers to switch to another saved account). History, settings and the data folders stay on disk; signing in again brings the account back.
 
-**Logging out** (`/logout`) revokes the token on Anthropic's side — for every copy of it. The extension notices and removes the account from the list everywhere, since switching to it could only fail.
+**Signing out** (Claude Code's account menu, or `/logout`) revokes the token on Anthropic's side — for every copy of it. The extension notices and removes the account from the list everywhere, since switching to it could only fail.
 
 ---
 
@@ -96,7 +96,7 @@ account stores                    per-window working copies
 
 The details that make it reliable — each one a bug found and fixed:
 
-- **Activation order.** Claude Code reads `CLAUDE_CONFIG_DIR` the moment it activates and caches it — so this extension activates *earlier* and sets the variable first. (That's also why switching needs a window reload.)
+- **Activation order.** Claude Code reads `CLAUDE_CONFIG_DIR` the moment it activates and caches it — so this extension must get there *first*. It uses the `*` activation event, which VSCode's docs discourage because it loads the extension at every start-up: a deliberate, load-bearing trade-off — with any lazier activation the variable would be set after Claude Code has already read it, and per-window accounts simply wouldn't work. The cost is kept negligible: a ~25 KB bundle with zero dependencies, and the activation path itself only sets the variable and does a handful of file checks — everything heavier is deferred. (The same start-up read is why switching needs a window reload.)
 - **A working copy per window.** A `/login` writes into the window's own directory, so it can only ever affect that window — "which window signed in?" is answered by construction, and no other window's account can be overwritten. Copies of an OAuth token authenticate independently, so the duplicates are safe.
 - **No competing source of truth.** A machine-wide `CLAUDE_CONFIG_DIR` in `claudeCode.environmentVariables` or `terminal.integrated.env` would force all windows onto one account — the extension strips it and keeps isolation in `process.env` only.
 - **Terminals follow the window.** Integrated terminals get the window's account via VSCode's environment-variable API. External terminals (outside VSCode) keep using the default `~/.claude`.
@@ -106,9 +106,9 @@ The details that make it reliable — each one a bug found and fixed:
 
 ## Settings
 
-| Setting | Default | Description |
-|---|---|---|
-| `claudeProfiles.sharedHistory` | `true` | One conversation history shared by all accounts. Turn off to keep each account's history isolated (each gets a full copy at that moment). |
+There is exactly one setting:
+
+- **`claudeProfiles.sharedHistory`** (default: `true`) — one conversation history shared by all accounts. Turn it off to keep each account's history isolated; every account gets its own full copy from that moment on.
 
 ---
 
@@ -129,6 +129,7 @@ This extension is built to manage credentials, so it holds itself to a strict po
 ## Limitations
 
 - **Linux only for now.** On macOS Claude Code keeps credentials in the Keychain (not files) and native Windows is untested — on both, the extension refuses to run rather than guess (see the note at the top). Support may come later.
+- **Loads at every VSCode start-up** (`*` activation). Required to win the activation race against Claude Code — see [How it works](#how-it-works). The extension is deliberately tiny, so the impact is milliseconds.
 - **API-key users**: this is for OAuth (claude.ai) logins. With `ANTHROPIC_API_KEY` you don't need it — set the key per window yourself.
 - **Switching reloads the window** — a consequence of Claude Code reading its account once at start-up; surfaced honestly rather than pretended around.
 - The account email is read from the account's config file because recent Claude Code versions don't expose it via `claude auth status`.

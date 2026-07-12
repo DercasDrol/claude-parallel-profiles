@@ -9,3 +9,4 @@ dist/**/*.js.map
 images/icon.svg
 .gitignore
 .vscodeignore
+.markdownlint.json

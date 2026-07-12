@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.5 — 2026-07-12
+
+### Fixed
+
+- **Shared-history links are created the moment a window's working directory is stocked**, not only at activation. Previously a `claude` process started right after a mid-session bind could write history into unlinked real directories — invisible to other accounts — and could not see conversations recorded before the bind, failing with "Session … not found" when forking/resuming (the root cause of that error on v1.2.0/1.2.1; the stray history was merged back into the shared store automatically, nothing was lost).
+
+### Changed
+
+- Sign-in/out wording in the README and in messages now leads with Claude Code's account-menu UI; slash commands are mentioned as the alternative.
+- README documents the deliberate `*` activation trade-off: why winning the activation race against Claude Code requires it, and why the cost stays negligible (~25 KB bundle, zero dependencies, trivial activation path).
+- README: the single-setting table replaced with plain text.
+
 ## 1.2.4 — 2026-07-12
 
 ### Changed

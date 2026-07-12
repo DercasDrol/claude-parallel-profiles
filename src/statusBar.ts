@@ -261,7 +261,8 @@ export class StatusBarManager implements vscode.Disposable {
         return;
       }
       vscode.window.showWarningMessage(
-        'No signed-in Claude account. Open the Claude Code panel and run /login, then click here to save it.'
+        'No signed-in Claude account. Sign in in the Claude Code panel (its account menu, or /login ' +
+          'in the chat) — the account is saved here automatically.'
       );
       return;
     }

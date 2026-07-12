@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { Account } from './accounts';
 import { materialize, windowWorkingDir } from './workdir';
+import { ensureSharedHistory } from './sharedHistory';
 import { log } from './log';
 
 /**
@@ -173,6 +174,16 @@ export class WindowBinding {
     // an empty dir means the user logged out and refilling it would undo that.
     const dir = this.workingDir();
     materialize(account, dir, true);
+    // A working dir born MID-SESSION (a bind between activations, e.g. a manual
+    // save in an unbound window) must see the shared history IMMEDIATELY:
+    // `claude` processes spawned from now on use this dir, and without the links
+    // they'd write history into real directories invisible to every other
+    // account — and fail to resume/fork any conversation recorded before the
+    // bind ("Session … not found", the v1.2.0/1.2.1 incident). The activation
+    // pass only covers dirs that exist at activation; this covers the gap.
+    if (vscode.workspace.getConfiguration('claudeProfiles').get<boolean>('sharedHistory', true)) {
+      ensureSharedHistory([dir]);
+    }
     log(`bind: ${account.name} → ${dir} (was ${process.env[ENV_VAR] ?? '(default)'})`);
     process.env[ENV_VAR] = dir;
     this.applyTerminalEnv(dir);
